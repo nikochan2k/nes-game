@@ -1,0 +1,292 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Dem, decodePng, rgbToElevation } from "./dem";
+import { IdMap, areaClassOf, assembleRings, latToY, lineAttrsOf, loadFeatures, lonToX } from "./osmfeatures";
+import { scanPbf } from "./osmpbf";
+import { OsmSource } from "./osmsource";
+import { fillRings, lineCells } from "./rasterize";
+import { readPolygons } from "./shapefile";
+import * as T from "./terrain";
+import {
+  cellToLonLat, cellToMeters, elevationToRgb, encodePng, writePbf, writeShp, type TNode, type TWay,
+} from "./testutil";
+import { BLOCK_M, CELL_M, MERC, Painter, blockRange, lonLatToBlock, slopeLevel, slopeLevels } from "./worldbuild";
+import { BLOCK_SIZE, classId, createDb, writeBlock } from "./worlddb";
+
+let dir: string;
+beforeAll(() => { dir = mkdtempSync(join(tmpdir(), "wb-")); });
+afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
+
+describe("座標", () => {
+  test("東京駅は z14 のタイル (14552, 6451)", () => {
+    expect(lonLatToBlock(139.7671, 35.6812)).toEqual([14552, 6451]);
+  });
+
+  test("度 ↔ マス座標", () => {
+    const [lon, lat] = cellToLonLat(14552 * 256 + 10.5, 6451 * 256 + 99.25);
+    expect(lonToX(lon)).toBeCloseTo(14552 * 256 + 10.5, 4);
+    expect(latToY(lat)).toBeCloseTo(6451 * 256 + 99.25, 4);
+    expect(BLOCK_M / BLOCK_SIZE).toBeCloseTo(CELL_M, 9);
+  });
+
+  test("bbox を覆うブロック", () => {
+    const r = blockRange([139.7, 35.6, 139.8, 35.7]);
+    const [bx, by] = lonLatToBlock(139.75, 35.65);
+    expect(bx >= r.bx0 && bx <= r.bx1 && by >= r.by0 && by <= r.by1).toBe(true);
+  });
+});
+
+describe("ラスタライズ", () => {
+  const win = { x0: 0, y0: 0, x1: 20, y1: 20 };
+
+  test("多角形: 中心が内側のマスだけ。穴は抜ける", () => {
+    const cells = new Set<string>();
+    const sq = (a: number, b: number) => Float64Array.from([a, a, b, a, b, b, a, b]);
+    fillRings([sq(2, 10), sq(4, 8)], win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells.add(`${x},${y}`); });
+    expect(cells.size).toBe(8 * 8 - 4 * 4);
+    expect(cells.has("2,2")).toBe(true);
+    expect(cells.has("5,5")).toBe(false);
+    expect(cells.has("10,5")).toBe(false);
+  });
+
+  test("多角形: 窓で切る。三角形の面積はおおむね合う", () => {
+    let n = 0;
+    fillRings([Float64Array.from([-5, -5, 15, -5, -5, 15])], win, (_y, xa, xb) => { n += xb - xa; });
+    expect(n).toBeGreaterThan(40);
+    expect(n).toBeLessThan(55);
+  });
+
+  test("線: 触れたマスを 4 連結で全部", () => {
+    const cells: [number, number][] = [];
+    lineCells(0.5, 0.5, 9.5, 4.5, win, (x, y) => cells.push([x, y]));
+    expect(cells[0]).toEqual([0, 0]);
+    expect(cells[cells.length - 1]).toEqual([9, 4]);
+    for (let i = 1; i < cells.length; i++) {
+      expect(Math.abs(cells[i][0] - cells[i - 1][0]) + Math.abs(cells[i][1] - cells[i - 1][1])).toBe(1);
+    }
+    const back: [number, number][] = [];
+    lineCells(9.5, 4.5, 0.5, 0.5, win, (x, y) => back.push([x, y]));
+    expect(new Set(back.map(String))).toEqual(new Set(cells.map(String)));
+  });
+
+  test("線: 窓の外は塗らない", () => {
+    const cells: [number, number][] = [];
+    lineCells(-100, 5.5, 100, 5.5, win, (x, y) => cells.push([x, y]));
+    expect(cells.length).toBe(20);
+  });
+});
+
+describe("PBF と地物", () => {
+  test("タグの意味", () => {
+    expect(areaClassOf({ landuse: "forest", building: "no" })).toBe(classId("landuse", "forest"));
+    expect(areaClassOf({ building: "house", landuse: "residential" })).toBe(classId("building", "yes"));
+    expect(areaClassOf({ natural: "coastline" })).toBe(0);
+    expect(lineAttrsOf({ highway: "motorway" })).toMatchObject({ hwy: true, road: 0 });
+    expect(lineAttrsOf({ highway: "trunk", motorroad: "yes" })).toMatchObject({ hwy: true, road: 0 });
+    expect(lineAttrsOf({ highway: "primary_link" })).toMatchObject({ road: classId("highway", "primary") });
+    expect(lineAttrsOf({ highway: "residential", bridge: "yes" })).toMatchObject({ bridge: true });
+    expect(lineAttrsOf({ highway: "residential", tunnel: "yes" })).toBeNull();
+    expect(lineAttrsOf({ waterway: "stream" })).toBeNull();
+    expect(lineAttrsOf({ waterway: "river" })).toMatchObject({ river: true });
+    expect(lineAttrsOf({ railway: "abandoned" })).toBeNull();
+  });
+
+  test("IdMap", () => {
+    const m = new IdMap(4);
+    for (let i = 1; i <= 1000; i++) m.set(i * 4294967311, i / 100, -i / 100);
+    expect(m.size).toBe(1000);
+    const s = m.find(500 * 4294967311);
+    expect(m.lat[s]).toBe(5e7);
+    expect(m.lon[s]).toBe(-5e7);
+    expect(m.find(7)).toBe(-1);
+  });
+
+  test("リングをつなぐ", () => {
+    const rings = assembleRings([[1, 2, 3], [5, 4, 3], [5, 6, 1], [10, 11, 12, 10], [20, 21]]);
+    expect(rings.length).toBe(2);
+    expect(rings.map((r) => r.length).sort()).toEqual([4, 7]);
+  });
+
+  test("PBF を読み戻す", async () => {
+    const path = join(dir, "t.pbf");
+    const nodes: TNode[] = [{ id: 10, lat: 35.5, lon: 139.5 }, { id: 4294967400, lat: 35.6, lon: 139.6 },
+      { id: 4294967500, lat: -10.25, lon: -70.125 }];
+    await writePbf(path, {
+      nodes,
+      ways: [{ id: 1, tags: { highway: "residential", name: "x" }, refs: [10, 4294967400, 4294967500] }],
+      rels: [{ id: 9, tags: { type: "multipolygon", landuse: "forest" },
+        members: [{ type: 1, id: 1, role: "outer" }, { type: 1, id: 5, role: "inner" }] }],
+    });
+    const got = { n: [] as number[][], w: [] as unknown[], r: [] as unknown[] };
+    await scanPbf(path, {
+      node: (id, lat, lon) => got.n.push([id, lat, lon]),
+      way: (id, tags, refs) => got.w.push([id, tags, refs]),
+      relation: (id, tags, m) => got.r.push([id, tags, m]),
+    });
+    expect(got.n.length).toBe(3);
+    expect(got.n[1][0]).toBe(4294967400);
+    expect(got.n[2][1]).toBeCloseTo(-10.25, 6);
+    expect(got.n[2][2]).toBeCloseTo(-70.125, 6);
+    expect(got.w).toEqual([[1, { highway: "residential", name: "x" }, [10, 4294967400, 4294967500]]]);
+    expect(got.r).toEqual([[9, { type: "multipolygon", landuse: "forest" },
+      [{ type: 1, id: 1, role: "outer" }, { type: 1, id: 5, role: "inner" }]]]);
+  });
+});
+
+describe("shapefile / 標高", () => {
+  test("多角形を読み、範囲外は読まない", async () => {
+    const path = join(dir, "land.shp");
+    const a = 1000.5 * 256, b = 1000.5 * 256 + 100;
+    await writeShp(path, [
+      [[[a, a], [b, a], [b, b], [a, b], [a, a]]],
+      [[[10, 10], [20, 10], [20, 20], [10, 20], [10, 10]]],
+    ]);
+    const [x0, y0] = cellToMeters(a - 5, b + 5), [x1, y1] = cellToMeters(b + 5, a - 5);
+    const polys = await readPolygons(path, [x0, y0, x1, y1]);
+    expect(polys.length).toBe(1);
+    expect(polys[0].minx).toBeCloseTo(a, 3);
+    expect(polys[0].maxy).toBeCloseTo(b, 3);
+    expect(polys[0].parts[0].length).toBe(10);
+  });
+
+  test("PNG のフィルタと標高の符号", () => {
+    const w = 8, h = 10, rgb = new Uint8Array(w * h * 3);
+    for (let i = 0; i < rgb.length; i++) rgb[i] = (i * 37) & 255;
+    const d = decodePng(encodePng(w, h, rgb));
+    expect([d.w, d.h]).toEqual([w, h]);
+    expect([...d.rgb]).toEqual([...rgb]);
+    expect(rgbToElevation(...elevationToRgb(123.45))).toBeCloseTo(123.45, 2);
+    expect(rgbToElevation(...elevationToRgb(-12.3))).toBeCloseTo(-12.3, 2);
+    expect(rgbToElevation(128, 0, 0)).toBe(0);
+  });
+
+  test("傾斜の段階の境目と、斜面の傾斜", () => {
+    expect([0, 4.9, 5, 24.9, 25, 44.9, 45, 59.9, 60, 89].map(slopeLevel)).toEqual([0, 0, 1, 3, 4, 5, 6, 6, 7, 7]);
+    const w = 4, h = 4, ew = w + 2, ymax = 4.2e6;
+    const g = CELL_M / Math.cosh((ymax - 2 * CELL_M) / 6378137);
+    const elev = new Float32Array(ew * (h + 2));
+    for (let y = 0; y < h + 2; y++) for (let x = 0; x < ew; x++) elev[y * ew + x] = x * g * 1.1;   // 約 48°
+    expect([...slopeLevels(elev, w, h, ymax)].every((v) => v === 6)).toBe(true);
+  });
+
+  test("DEM: 隣のタイルをまたいで傾斜が連続する", () => {
+    const bx = 1000, by = 500;
+    const mk = (f: (x: number) => number) => {
+      const rgb = new Uint8Array(256 * 256 * 3);
+      for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) rgb.set(elevationToRgb(f(x)), (y * 256 + x) * 3);
+      return encodePng(256, 256, rgb);
+    };
+    const put = (x: number, y: number, png: Uint8Array) => {
+      mkdirSync(join(dir, "dem", "14", String(x)), { recursive: true });
+      writeFileSync(join(dir, "dem", "14", String(x), `${y}.png`), png);
+    };
+    const ymax = MERC - by * BLOCK_M, g = CELL_M / Math.cosh(ymax / 6378137);
+    put(bx, by, mk((x) => x * g * 1.1));                // 東へ急な上り
+    put(bx + 1, by, mk((x) => (x + 256) * g * 1.1));    // 続き
+    const s = new Dem(join(dir, "dem")).slope(bx, by, ymax)!;
+    expect(s[10 * 256 + 255]).toBe(6);                  // 右端 (隣のタイルを使うので連続)
+    expect(s[10 * 256 + 128]).toBe(6);
+    expect(new Dem(join(dir, "dem")).slope(1, 1, ymax)).toBeNull();
+  });
+});
+
+describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () => {
+  const bx = 14552, by = 6451, X0 = bx * 256, Y0 = by * 256;
+  let src: OsmSource;
+  const ll = (dx: number, dy: number) => cellToLonLat(X0 + dx, Y0 + dy);
+
+  beforeAll(async () => {
+    // 地物はすべてこの 1 ブロック (256x256) の中。西半分 (x<128) が陸。
+    const nodes: TNode[] = [], ways: TWay[] = [];
+    let nid = 1, wid = 100;
+    const nodeAt = (dx: number, dy: number) => {
+      const [lon, lat] = ll(dx, dy);
+      nodes.push({ id: nid, lat, lon });
+      return nid++;
+    };
+    const line = (tags: Record<string, string>, pts: [number, number][], closed = false) => {
+      const refs = pts.map(([x, y]) => nodeAt(x, y));
+      if (closed) refs.push(refs[0]);
+      ways.push({ id: wid, tags, refs });
+      return wid++;
+    };
+    const box = (x0: number, y0: number, x1: number, y1: number): [number, number][] =>
+      [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+
+    line({ landuse: "forest" }, box(10, 10, 50, 50), true);
+    line({ building: "yes" }, box(20, 20, 24, 24), true);                      // 森の中の建物
+    line({ highway: "residential" }, [[0.5, 80.5], [100.5, 80.5]]);               // 横の道路
+    line({ highway: "residential" }, [[60.5, 60.5], [60.5, 110.5]]);              // 縦の道路 (60,80 で交差)
+    line({ highway: "motorway" }, [[0.5, 120.5], [100.5, 120.5]]);
+    line({ railway: "rail" }, [[30.5, 60.5], [30.5, 110.5]]);                      // 縦の線路 (30,80 は踏切)
+    line({ waterway: "river" }, [[80.5, 0.5], [80.5, 200.5]]);                     // 縦の川
+    line({ highway: "residential", bridge: "yes" }, [[75.5, 140.5], [85.5, 140.5]]);
+    // 湖 (外側と内側の穴をそれぞれ 2 本のウェイに分ける)
+    const o1 = [nodeAt(90, 150), nodeAt(110, 150), nodeAt(110, 190)];
+    const o2 = [o1[2], nodeAt(90, 190), o1[0]];
+    const i1 = [nodeAt(95, 165), nodeAt(105, 165), nodeAt(105, 175)];
+    const i2 = [i1[2], nodeAt(95, 175), i1[0]];
+    const wo1 = wid++, wo2 = wid++, wi1 = wid++, wi2 = wid++;
+    ways.push({ id: wo1, tags: {}, refs: o1 }, { id: wo2, tags: {}, refs: o2 },
+      { id: wi1, tags: {}, refs: i1 }, { id: wi2, tags: {}, refs: i2 });
+    // 範囲外の遠いウェイ (読まれないこと)
+    ways.push({ id: wid, tags: { highway: "residential" }, refs: [nodeAt(5000, 5000), nodeAt(5100, 5000)] });
+
+    const pbf = join(dir, "e2e.pbf");
+    await writePbf(pbf, {
+      nodes, ways,
+      rels: [{ id: 1, tags: { type: "multipolygon", natural: "water" }, members: [
+        { type: 1, id: wo1, role: "outer" }, { type: 1, id: wo2, role: "outer" },
+        { type: 1, id: wi1, role: "inner" }, { type: 1, id: wi2, role: "inner" }] }],
+    });
+    const shp = join(dir, "e2e.shp");
+    await writeShp(shp, [[[[X0 - 500, Y0 - 500], [X0 + 128, Y0 - 500], [X0 + 128, Y0 + 700], [X0 - 500, Y0 + 700]]]]);
+
+    const [w, n] = ll(10, 10), [e, s] = ll(250, 250);
+    const feats = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
+    const areas = feats.filter((f) => f.area).sort((a, b) => a.rank - b.rank);
+    const lines = feats.filter((f) => !f.area).sort((a, b) => a.rank - b.rank);
+    expect(feats.some((f) => f.minx > X0 + 1000)).toBe(false);
+    const [mx0, my1] = cellToMeters(X0 - 300, Y0 - 300), [mx1, my0] = cellToMeters(X0 + 600, Y0 + 600);
+    const land = await readPolygons(shp, [mx0, my0, mx1, my1]);
+
+    const p = new Painter(1);
+    p.paint(bx, by, land, areas, lines);
+    const cells = p.block(0, 0)!;
+    const db = createDb(join(dir, "e2e.sqlite"));
+    writeBlock(db, bx, by, cells);
+    db.close();
+    src = new OsmSource(join(dir, "e2e.sqlite"));
+  });
+  afterAll(() => src?.close());
+
+  const c = (dx: number, dy: number) => src.cell(18, X0 + dx, Y0 + dy);
+
+  test("面: 森・建物・草原・海", () => {
+    expect(c(15, 15)).toBe(T.T_FOREST);
+    expect(c(22, 22)).toBe(T.T_BUILDING);
+    expect(c(100, 15)).toBe(T.T_GRASS);          // 陸 (x<128) で何もない
+    expect(c(200, 15)).toBe(T.T_WATER);          // 陸地ポリゴンの外 = 海
+  });
+
+  test("道路・交差・踏切・高速道路", () => {
+    expect(c(45, 80)).toBe(T.T_ROAD_H);
+    expect(c(60, 70)).toBe(T.T_ROAD_V);
+    expect(c(60, 80)).toBe(T.T_ROAD_X);
+    expect(c(30, 70)).toBe(T.T_RAIL_V);
+    expect(c(30, 80)).toBe(T.T_CROSSING);
+    expect(c(50, 120)).toBe(T.T_HWY_H);
+  });
+
+  test("川と橋", () => {
+    expect(c(80, 30)).toBe(T.T_WATER);
+    expect(c(80, 140)).toBe(T.T_BRIDGE_H);       // 川の上の道路
+  });
+
+  test("湖: multipolygon の穴は水にならない", () => {
+    expect(c(92, 155)).toBe(T.T_WATER);
+    expect(c(100, 170)).toBe(T.T_GRASS);         // 内側の島
+  });
+});

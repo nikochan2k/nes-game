@@ -47,7 +47,7 @@ Mesen は `/Applications` または `~/Applications` から探す。
 ## 操作
 
 - 十字キー: 東西南北に 1 マスずつ移動 (エミュレータの既定キーは矢印キー)
-- A: ズームイン / B: ズームアウト (z=1..20)
+- A: ズームイン / B: ズームアウト (z=1..18)
 - マス: 草原・山・森・橋・道路は通行可、水・岩山は通行不可。極の先 (y の範囲外) は岩で進めない
 - 画面はプレイヤーを中心に滑らかにスクロールする
 
@@ -66,8 +66,21 @@ Mesen は `/Applications` または `~/Applications` から探す。
 2. `make server` でサーバーを起動する。
 3. 別ターミナルで `make bridge` を実行する。`mesen/bridge.lua` がシリアルを TCP に中継する。
 
-`make test` でサーバーのテストを実行する。現状の地形は `server/mapserver.ts` のノイズで作った仮の世界で、
-実際の地図 (タイル画像の分類など) への差し替えは `SyntheticSource` を置き換える。
+`make test` でサーバーのテストを実行する。`data/world.sqlite` (形式は `server/worlddb.ts`、
+`doc/tile-conversion-plan.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
+`server/mapserver.ts` のノイズで作った仮の世界を返す。`--db` でファイルを指定できる。
+
+`data/world.sqlite` は Bun だけで作れる (osmium / GDAL 不要)。入力は OSM の pbf (Geofabrik)、
+陸地ポリゴン (`land-polygons-split-3857`)、国土地理院の標高タイル (`dem_png` z14)。
+
+```
+bun server/build_world.ts check
+bun server/build_world.ts dem   --bbox 139.6,35.6,139.9,35.8
+bun server/build_world.ts build --bbox 139.6,35.6,139.9,35.8 --pbf data/osm/kanto-latest.osm.pbf
+```
+
+データの出典: © OpenStreetMap contributors (ODbL)、国土地理院。`world.sqlite` は OSM の派生データベースになるので、
+配布するときは ODbL の条件に従う。
 
 ## 仕組み
 
