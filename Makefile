@@ -6,7 +6,7 @@
 CL65     ?= cl65
 CA65     ?= ca65
 LD65     ?= ld65
-SRC      := src/crt0.s src/main.c src/chr.s
+SRC      := src/crt0.s src/ppu.s src/main.c src/link.c src/worldgen.c src/chr.s
 CFG      := cfg/field.cfg
 CHR      := gfx/tiles.chr
 ROM      := build/field.nes
@@ -31,7 +31,7 @@ all: $(ROM)
 $(CHR): gfx/gen_chr.py
 	python3 gfx/gen_chr.py $@
 
-$(ROM): $(SRC) $(CFG) $(CHR)
+$(ROM): $(SRC) $(wildcard src/*.h) $(CFG) $(CHR)
 	@mkdir -p build
 	$(CL65) -t none -O -g -C $(CFG) --obj-path build \
 		-Wl --dbgfile,$(DBG) \

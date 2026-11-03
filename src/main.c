@@ -1,5 +1,9 @@
-/* 現代の街道を歩くフィールド移動デモ (4 画面 = 2x2)。
- * 4 画面ミラーでワールド全体を VRAM に載せ、カメラをスクロールレジスタで動かす。 */
+/* 現代の街道を歩く、無限に広がるフィールド移動デモ。
+ * 4 画面ミラーの VRAM (32x30 マスの輪) をカメラ位置に合わせて少しずつ描き足す。
+ * 地形は link_fetch() で外部から受け取る。 */
+
+#include "terrain.h"
+#include "link.h"
 
 #define PPU_CTRL   (*(volatile unsigned char *)0x2000)
 #define PPU_MASK   (*(volatile unsigned char *)0x2001)
@@ -15,49 +19,22 @@
 #define PAD_LEFT  0x02
 #define PAD_RIGHT 0x01
 
-#define MAP_W 32
-#define MAP_H 28
-#define SCR_W 16               /* 1 画面 = 16x15 マス (1 マス = 16x16 px) */
-#define SCR_H 15
+#define RING_W 32              /* VRAM の輪: 32x30 マス (1 マス = 16x16 px) */
+#define RING_H 30
+#define NT_H   15              /* ネームテーブル 1 枚 = 16x15 マス */
+#define HALF_W 9               /* 常に読み込んでおく範囲: 中心から左右 9 / 上下 8 マス */
+#define HALF_H 8
+#define LINE_MAX 19
 #define STEP_PX 2              /* 1 フレームの移動量 (16px / 2 = 8 フレーム/マス) */
+#define CELLS_PER_FRAME 4      /* 1 フレームで vblank 用に積むマス数 */
+#define FETCH_PER_FRAME 8      /* 1 フレームで取得するマス数 */
+#define PLAYER_X 120           /* プレイヤーは常に画面中央 */
+#define PLAYER_Y 111
 
-enum { T_GRASS, T_FOREST, T_MOUNTAIN, T_ROCK, T_WATER,
-       T_BRIDGE_H, T_BRIDGE_V, T_ROAD_H, T_ROAD_V, T_ROAD_X };
-enum { DIR_DOWN, DIR_UP, DIR_LEFT, DIR_RIGHT };
+enum { DIR_DOWN, DIR_UP, DIR_LEFT, DIR_RIGHT, DIR_NONE };
+enum { PROBE_NONE, PROBE_REQ, PROBE_OK, PROBE_BLOCKED };
 
 extern void wait_vblank(void);
-
-/* . 草原  ^ 山  T 森  ~ 水  # 岩山  b/B 橋(横/縦)  -/| 道路  + 交差点 */
-static const char world[MAP_H][MAP_W + 1] = {
-    "........|.....~~........|.......",
-    ".^^^^^^.|.....~~...####.|.#####.",
-    ".^^^^^^.|.....~~...####.|.#####.",
-    ".^^^^^^.|.....~~...####.|.#####.",
-    ".^^^^^^.|.....~~...####.|.......",
-    "........|.....~~........|.......",
-    "--------+-----bb--------+-------",
-    "........|.....~~........|.......",
-    "........|.....~~..TTTTT.|.......",
-    "........|.TTT..~~.TTTTT.|..####.",
-    "..^^^^..|.TTT..~~.TTTTT.|..####.",
-    "..^^^^..|.TTT..~~.TTTTT.|..####.",
-    "..^^^^..|.TTT..~~.TTTTT.|..####.",
-    "........|......~~.......|.......",
-    "........|......~~.......|.......",
-    "........|......~~.......|.......",
-    ".TTTTTT.|.~~~..~~...^^^^|.~~~~~.",
-    ".TTTTTT.|.~~~..~~...^^^^|.~~~~~.",
-    ".TTTTTT.|.~~~..~~.......|.~~~~~.",
-    "........|.......~~......|.~~~~~.",
-    "--------+-------bb------+-------",
-    "........|.......~~......|.......",
-    "........|.......~~.TTTT.|...~~~.",
-    ".######.|.TTTT..~~.TTTT.|...~~~.",
-    ".######.|.TTTT..~~.TTTT.|...~~~.",
-    ".######.|.TTTT..~~.TTTT.|...~~~.",
-    ".######.|.TTTT..~~.TTTT.|.......",
-    "........|.......~~......|.......",
-};
 
 /* BG パレット: 0=草/森 1=山 2=岩/道路 3=水/橋 (T_* の並び順) */
 static const unsigned char tile_pal[] = { 0, 0, 1, 2, 3, 3, 3, 2, 2, 2 };
@@ -73,36 +50,26 @@ static const unsigned char palette[32] = {
     0x1A, 0x0F, 0x36, 0x16
 };
 
-static unsigned char cx, cy;   /* 現在のマス */
+static unsigned cx, cy;        /* 現在のマス (16bit で巻き戻る) */
 static signed char ox, oy;     /* 描画上の残り移動量 (px) */
 static unsigned char dir;
 static unsigned char toggle;   /* 歩くたびに反転 (足の左右) */
-static int cam_x, cam_y;       /* カメラ左上のワールド座標 (px) */
+static int scr_x, scr_y;       /* スクロール位置 (輪の中の px: 0..511 / 0..479) */
 
-static unsigned char terrain(unsigned char x, unsigned char y)
-{
-    if (x >= MAP_W || y >= MAP_H) {
-        return T_GRASS;             /* NT の余り (最下段 2 行ぶん) */
-    }
-    switch (world[y][x]) {
-    case 'T': return T_FOREST;
-    case '^': return T_MOUNTAIN;
-    case '#': return T_ROCK;
-    case '~': return T_WATER;
-    case 'b': return T_BRIDGE_H;
-    case 'B': return T_BRIDGE_V;
-    case '-': return T_ROAD_H;
-    case '|': return T_ROAD_V;
-    case '+': return T_ROAD_X;
-    default:  return T_GRASS;
-    }
-}
+/* 進行方向の先の地形を VRAM から読み戻して通行可否を決める */
+static unsigned probe_x, probe_y, probe_addr;   /* probe_addr: 先のマスの VRAM アドレス */
+static unsigned char probe, probe_dir;
 
-static unsigned char passable(unsigned char x, unsigned char y)
-{
-    unsigned char t = terrain(x, y);
-    return t != T_WATER && t != T_ROCK;
-}
+/* 1 本ぶん (行または列) の描き足しジョブ */
+static unsigned char job_buf[LINE_MAX];
+static unsigned job_x, job_y;           /* 取得開始のワールド座標 */
+static unsigned char job_n, job_fetched, job_done, job_vert, job_sx, job_sy;
+
+static unsigned char attr_shadow[256];   /* 属性テーブルの控え (NT0..3 の 64 バイトずつ) */
+
+#ifdef PROFILE
+#define DBG(n) (*(volatile unsigned char *)(0x05F0 + (n)))
+#endif
 
 static unsigned char read_pad(void)
 {
@@ -115,58 +82,123 @@ static unsigned char read_pad(void)
     return v;
 }
 
-/* ワールド全体を 4 画面分のネームテーブルに描く (描画は止める)。
- * NT0=左上 NT1=右上 NT2=左下 NT3=右下。NT 内は 16x15 マス。 */
-static void draw_world(void)
+/* 輪の中のマス (sx, sy) -> そのマスの左上タイルの VRAM アドレス (上位 / 下位) */
+static unsigned cell_addr(unsigned char sx, unsigned char sy)
 {
-    unsigned char nt, bx, by, x, y, half, t, a;
+    unsigned char nt = sx >> 4, ly = sy;
+    if (sy >= NT_H) {
+        nt |= 2;
+        ly = sy - NT_H;
+    }
+    return 0x2000 + ((unsigned)nt << 10) + ((unsigned)ly << 6) + ((unsigned)(sx & 15) << 1);
+}
 
-    PPU_MASK = 0;
-    x = PPU_STATUS;
-    for (nt = 0; nt < 4; ++nt) {
-        bx = (nt & 1) * SCR_W;
-        by = (nt >> 1) * SCR_H;
-        PPU_ADDR = 0x20 + nt * 4;
-        PPU_ADDR = 0x00;
-        for (y = 0; y < SCR_H; ++y) {
-            for (half = 0; half < 2; ++half) {
-                for (x = 0; x < SCR_W; ++x) {
-                    t = terrain(bx + x, by + y) * 4 + half * 2;
-                    PPU_DATA = t;
-                    PPU_DATA = t + 1;
-                }
+/* vblank に書く内容を先に作っておくキュー (1 マス = 11 バイト)。
+ * アドレス計算や属性の合成は重いので vblank の外で済ませる。 */
+#define QCELLS 6
+#define QREC   11
+unsigned char queue[QCELLS * QREC];   /* ppu.s から参照 */
+unsigned char queue_n;
+
+/* マス (sx, sy) の描画内容 (タイル 2x2 + 属性) をキューに積む */
+static void queue_cell(unsigned char sx, unsigned char sy, unsigned char t)
+{
+    unsigned char nt = sx >> 4, lx = sx & 15, ly = sy, ab, sh, v, p = tile_pal[t];
+    unsigned char *q = queue + queue_n * QREC;
+    unsigned char hi, lo;
+
+    if (sy >= NT_H) {
+        nt |= 2;
+        ly = sy - NT_H;
+    }
+    t <<= 2;
+    hi = 0x20 + (nt << 2) + (ly >> 2);            /* ly * 64 + lx * 2 を 8bit で組む */
+    lo = ((ly & 3) << 6) | (lx << 1);
+    q[0] = hi;  q[1] = lo;       q[2] = t;      q[3] = t + 1;
+    q[4] = hi;  q[5] = lo | 32;  q[6] = t + 2;  q[7] = t + 3;
+
+    ab = (ly >> 1) * 8 + (lx >> 1);
+    sh = ((ly & 1) << 2) | ((lx & 1) << 1);
+    v = (attr_shadow[(nt << 6) + ab] & (unsigned char)~(3 << sh)) | (p << sh);
+    attr_shadow[(nt << 6) + ab] = v;
+    q[8] = 0x23 + (nt << 2);  q[9] = 0xC0 + ab;  q[10] = v;
+    ++queue_n;
+}
+
+/* キューの内容を PPU へ書く (src/ppu.s)。vblank 内で呼ぶ。 */
+extern void flush_cells(void);
+
+/* (x, y) から n マスぶんを描き足すジョブを登録する (取得は job_fetch で少しずつ) */
+static void job_start(unsigned x, unsigned y, unsigned char vert, unsigned char n)
+{
+    job_x = x;
+    job_y = y;
+    job_fetched = 0;
+    job_sx = x & (RING_W - 1);
+    job_sy = y % RING_H;
+    job_vert = vert;
+    job_n = n;
+    job_done = 0;
+}
+
+/* ジョブの地形を最大 max マス取得する。1 フレームに収まるよう分割する。 */
+static void job_fetch(unsigned char max)
+{
+    unsigned char k = job_n - job_fetched;
+    if (k > max) {
+        k = max;
+    }
+    if (k) {
+        link_fetch(job_vert ? job_x : job_x + job_fetched,
+                   job_vert ? job_y + job_fetched : job_y,
+                   job_vert, k, job_buf + job_fetched);
+        job_fetched += k;
+    }
+}
+
+/* 取得済みのマスを最大 max マスぶんキューに積む */
+static void stream_cells(unsigned char max)
+{
+    while (max-- && job_done < job_fetched) {
+        queue_cell(job_sx, job_sy, job_buf[job_done]);
+        ++job_done;
+        if (job_vert) {
+            if (++job_sy == RING_H) {
+                job_sy = 0;
             }
-        }
-        for (y = 0; y < 8; ++y) {   /* 属性: 1 マス (16x16) ごとにパレット */
-            for (x = 0; x < 8; ++x) {
-                a = tile_pal[terrain(bx + x * 2, by + y * 2)]
-                  | tile_pal[terrain(bx + x * 2 + 1, by + y * 2)] << 2
-                  | tile_pal[terrain(bx + x * 2, by + y * 2 + 1)] << 4
-                  | tile_pal[terrain(bx + x * 2 + 1, by + y * 2 + 1)] << 6;
-                PPU_DATA = a;
-            }
+        } else {
+            job_sx = (job_sx + 1) & (RING_W - 1);
         }
     }
 }
 
-/* プレイヤーが画面中央に来るようカメラを置く (ワールド端では止める) */
-static void update_camera(void)
+/* 通行可否の判定要求を処理する。vblank 内で呼ぶ。 */
+static void probe_run(void)
 {
-    cam_x = (cx * 16 + ox) - 120;
-    cam_y = (cy * 16 + oy) - 112;
-    if (cam_x < 0) cam_x = 0;
-    if (cam_x > MAP_W * 16 - 256) cam_x = MAP_W * 16 - 256;
-    if (cam_y < 0) cam_y = 0;
-    if (cam_y > MAP_H * 16 - 240) cam_y = MAP_H * 16 - 240;
+    unsigned char t;
+
+    if (probe != PROBE_REQ) {
+        return;
+    }
+    PPU_ADDR = probe_addr >> 8;
+    PPU_ADDR = (unsigned char)probe_addr;
+    t = PPU_DATA;                   /* 1 回目は読み捨て */
+    t = PPU_DATA >> 2;
+    probe = (t == T_WATER || t == T_ROCK) ? PROBE_BLOCKED : PROBE_OK;
 }
 
-/* vblank 中に呼ぶ */
+/* vblank 内で呼ぶ */
 static void apply_scroll(void)
 {
     unsigned char x = PPU_STATUS;
-    PPU_CTRL = 0x88 | (cam_x >= 256 ? 1 : 0);
-    PPU_SCROLL = (unsigned char)cam_x;      /* 下位 8bit。256 以上はベースNTで表現 */
-    PPU_SCROLL = (unsigned char)cam_y;      /* cam_y は最大 208 < 240 */
+    unsigned char ctrl = 0x88 | (scr_x >> 8), sy = scr_y;
+    if (scr_y >= 240) {
+        ctrl |= 2;
+        sy = scr_y - 240;
+    }
+    PPU_CTRL = ctrl;
+    PPU_SCROLL = (unsigned char)scr_x;
+    PPU_SCROLL = sy;
 }
 
 static void draw_player(void)
@@ -174,8 +206,6 @@ static void draw_player(void)
     unsigned char moving = (ox | oy) != 0;
     signed char m = ox ? ox : oy;
     unsigned char frame, flip, tl, tr, bl, br;
-    int px = cx * 16 + ox - cam_x;
-    int py = cy * 16 + oy - cam_y - 1;
 
     if (m < 0) {
         m = -m;
@@ -194,36 +224,104 @@ static void draw_player(void)
     if (flip) {
         tl ^= 1; tr ^= 1; bl ^= 1; br ^= 1;
     }
-    OAM[0] = py;      OAM[1] = tl; OAM[2] = flip ? 0x40 : 0; OAM[3] = px;
-    OAM[4] = py;      OAM[5] = tr; OAM[6] = flip ? 0x40 : 0; OAM[7] = px + 8;
-    OAM[8] = py + 8;  OAM[9] = bl; OAM[10] = flip ? 0x41 : 1; OAM[11] = px;
-    OAM[12] = py + 8; OAM[13] = br; OAM[14] = flip ? 0x41 : 1; OAM[15] = px + 8;
+    OAM[0] = PLAYER_Y;      OAM[1] = tl; OAM[2] = flip ? 0x40 : 0; OAM[3] = PLAYER_X;
+    OAM[4] = PLAYER_Y;      OAM[5] = tr; OAM[6] = flip ? 0x40 : 0; OAM[7] = PLAYER_X + 8;
+    OAM[8] = PLAYER_Y + 8;  OAM[9] = bl; OAM[10] = flip ? 0x41 : 1; OAM[11] = PLAYER_X;
+    OAM[12] = PLAYER_Y + 8; OAM[13] = br; OAM[14] = flip ? 0x41 : 1; OAM[15] = PLAYER_X + 8;
+}
+
+/* 歩行を 1 フレーム進め、カメラ (スクロール) も同じだけ動かす */
+static void advance(void)
+{
+    if (ox < 0)      { ox += STEP_PX; scr_x += STEP_PX; }
+    else if (ox > 0) { ox -= STEP_PX; scr_x -= STEP_PX; }
+    if (oy < 0)      { oy += STEP_PX; scr_y += STEP_PX; }
+    else if (oy > 0) { oy -= STEP_PX; scr_y -= STEP_PX; }
+    if (scr_x < 0) scr_x += RING_W * 16;
+    if (scr_x >= RING_W * 16) scr_x -= RING_W * 16;
+    if (scr_y < 0) scr_y += RING_H * 16;
+    if (scr_y >= RING_H * 16) scr_y -= RING_H * 16;
+}
+
+static void begin_step(unsigned char d)
+{
+    switch (d) {
+    case DIR_UP:
+        --cy; oy = 16;
+        job_start(cx - HALF_W, cy - HALF_H, 0, 2 * HALF_W + 1);
+        break;
+    case DIR_DOWN:
+        ++cy; oy = -16;
+        job_start(cx - HALF_W, cy + HALF_H, 0, 2 * HALF_W + 1);
+        break;
+    case DIR_LEFT:
+        --cx; ox = 16;
+        job_start(cx - HALF_W, cy - HALF_H, 1, 2 * HALF_H + 1);
+        break;
+    default:
+        ++cx; ox = -16;
+        job_start(cx + HALF_W, cy - HALF_H, 1, 2 * HALF_H + 1);
+        break;
+    }
+    toggle ^= 1;
 }
 
 static void update_player(unsigned char pad)
 {
-    unsigned char nx = cx, ny = cy;
+    unsigned char want = DIR_NONE;
 
     if (ox || oy) {
-        if (ox < 0) ox += STEP_PX; else if (ox > 0) ox -= STEP_PX;
-        if (oy < 0) oy += STEP_PX; else if (oy > 0) oy -= STEP_PX;
-        return;
+        advance();
     }
-    if (pad & PAD_UP)         { dir = DIR_UP;    --ny; }
-    else if (pad & PAD_DOWN)  { dir = DIR_DOWN;  ++ny; }
-    else if (pad & PAD_LEFT)  { dir = DIR_LEFT;  --nx; }
-    else if (pad & PAD_RIGHT) { dir = DIR_RIGHT; ++nx; }
-    else return;
+    if (ox || oy) {
+        return;                     /* 歩行中 */
+    }
 
-    /* 範囲外 (unsigned の -1 含む) / 通行不可。最上段は OAM Y=-1 になるため入れない */
-    if (nx >= MAP_W || ny >= MAP_H || ny == 0 || !passable(nx, ny)) {
+    if (pad & PAD_UP)         want = DIR_UP;
+    else if (pad & PAD_DOWN)  want = DIR_DOWN;
+    else if (pad & PAD_LEFT)  want = DIR_LEFT;
+    else if (pad & PAD_RIGHT) want = DIR_RIGHT;
+
+    if (probe == PROBE_OK && want == probe_dir) {
+        if (job_done < job_n) {
+            return;                 /* 前のジョブが終わるまで待つ */
+        }
+        probe = PROBE_NONE;
+        begin_step(want);
+        advance();
         return;
     }
-    toggle ^= 1;
-    ox = (signed char)(cx - nx) * 16;
-    oy = (signed char)(cy - ny) * 16;
-    cx = nx;
-    cy = ny;
+    probe = PROBE_NONE;
+    if (want == DIR_NONE) {
+        return;
+    }
+    dir = want;                     /* その場で向きだけ変える */
+    probe_dir = want;
+    probe_x = cx;
+    probe_y = cy;
+    if (want == DIR_UP)         --probe_y;
+    else if (want == DIR_DOWN)  ++probe_y;
+    else if (want == DIR_LEFT)  --probe_x;
+    else                        ++probe_x;
+    probe_addr = cell_addr(probe_x & (RING_W - 1), probe_y % RING_H);
+    probe = PROBE_REQ;
+}
+
+/* 起動時: 中心の周り (19x17 マス) を描画停止中にまとめて描く */
+static void init_world(void)
+{
+    unsigned y;
+    unsigned char n;
+
+    PPU_MASK = 0;
+    for (y = cy - HALF_H; y != cy + HALF_H + 1; ++y) {
+        job_start(cx - HALF_W, y, 0, 2 * HALF_W + 1);
+        job_fetch(LINE_MAX);
+        for (n = 0; n < 4; ++n) {
+            stream_cells(QCELLS);
+            flush_cells();
+        }
+    }
 }
 
 void main(void)
@@ -239,22 +337,31 @@ void main(void)
         PPU_DATA = palette[i];
     }
 
-    cx = 8;
-    cy = 8;
+    cx = 1024;                      /* 道路の交差点から始める */
+    cy = 1024;
     dir = DIR_DOWN;
+    scr_x = ((cx & (RING_W - 1)) * 16 + RING_W * 16 - PLAYER_X) & (RING_W * 16 - 1);
+    scr_y = ((cy % RING_H) * 16 + RING_H * 16 - (PLAYER_Y + 1)) % (RING_H * 16);
+
     PPU_CTRL = 0x88;                /* NMI 有効 / スプライトはパターンテーブル 1 */
-    draw_world();
-    update_camera();
+    init_world();
     draw_player();
     wait_vblank();
     apply_scroll();
-    PPU_MASK = 0x1E;                /* 以降の PPU_CTRL は apply_scroll が毎フレーム設定 */
+    PPU_MASK = 0x1E;
 
     for (;;) {
         wait_vblank();
-        apply_scroll();             /* 前フレームの状態 = 今 DMA された OAM と一致 */
+        flush_cells();
+        probe_run();
+        apply_scroll();
+        job_fetch(FETCH_PER_FRAME);
+        stream_cells(CELLS_PER_FRAME);
         update_player(read_pad());
-        update_camera();
         draw_player();
+#ifdef PROFILE
+        ++DBG(0);
+        DBG(1) = cx; DBG(2) = cx >> 8; DBG(3) = cy; DBG(4) = cy >> 8;
+#endif
     }
 }
