@@ -1,6 +1,6 @@
 # nes-game
 
-cc65 でビルドする NES (ファミコン) 用ゲームのプロジェクト。現状は画面に "HELLO NES" を表示するだけの最小構成。
+cc65 でビルドする NES (ファミコン) 用ゲームのプロジェクト。現状は現代の街道を歩いて回るフィールド移動デモ (4 画面)。
 
 ## 必要なもの
 
@@ -29,8 +29,8 @@ make
 
 `build/` に次のファイルが生成される。
 
-- `build/hello.nes` : ROM
-- `build/hello.dbg` : Mesen 用デバッグシンボル
+- `build/field.nes` : ROM
+- `build/field.dbg` : Mesen 用デバッグシンボル
 
 ## 起動
 
@@ -41,7 +41,16 @@ make run
 ROM をビルドしたうえで、Mesen があれば Mesen で、なければ `.nes` に関連付けられたデフォルトのアプリで開く。
 Mesen は `/Applications` または `~/Applications` から探す。
 
-手動で起動する場合は、エミュレータで `build/hello.nes` を開く。
+手動で起動する場合は、エミュレータで `build/field.nes` を開く。
+
+## 操作
+
+- 十字キー: 東西南北に 1 マスずつ移動 (エミュレータの既定キーは矢印キー)
+- マス: 草原・山・森・橋・道路は通行可、水・岩山は通行不可
+- フィールドは 2x2 = 4 画面 (32x28 マス)。画面端を越えると隣の画面に切り替わる
+
+マップは `src/main.c` の `world[]` を文字で編集する (`.` 草原 `^` 山 `T` 森 `~` 水 `#` 岩山 `b`/`B` 橋 `-`/`|` 道路 `+` 交差点)。
+タイル絵は `gfx/gen_chr.py` で `gfx/tiles.chr` に生成する (`make` が自動で実行)。
 
 ## クリーン
 
@@ -65,8 +74,9 @@ make clean
 ```
 .
 ├── Makefile      ビルド定義
-├── src/          ソースコード (エントリポイント: src/main.c)
-├── gfx/          グラフィック素材 (CHR タイルなど)
+├── cfg/          リンカ設定 (field.cfg)
+├── src/          crt0.s (起動) / main.c (ゲーム本体) / chr.s (CHR 取り込み)
+├── gfx/          gen_chr.py と生成された tiles.chr
 ├── audio/        サウンド素材 (FamiStudio の出力など)
 ├── build/        ビルド成果物 (git 管理外)
 └── .vscode/      エディタ設定 (VS Code / Cursor)

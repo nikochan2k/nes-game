@@ -1,15 +1,16 @@
 # NES toolchain (cc65 + GNU Make)
-#   make          build ROM + Mesen debug symbols
+#   make          build ROM + Mesen debug symbols (CHR は gfx/gen_chr.py から生成)
 #   make run      open in Mesen if installed, else the default app
 #   make doctor   check recommended tools
 
 CL65     ?= cl65
 CA65     ?= ca65
 LD65     ?= ld65
-SRC      := src/main.c
-ROM      := build/hello.nes
-DBG      := build/hello.dbg
-TARGET   := nes
+SRC      := src/crt0.s src/main.c src/chr.s
+CFG      := cfg/field.cfg
+CHR      := gfx/tiles.chr
+ROM      := build/field.nes
+DBG      := build/field.dbg
 
 MESEN_APP := $(firstword $(wildcard \
 	/Applications/Mesen.app \
@@ -27,9 +28,12 @@ FAMISTUDIO_APP := $(firstword $(wildcard \
 
 all: $(ROM)
 
-$(ROM): $(SRC)
+$(CHR): gfx/gen_chr.py
+	python3 gfx/gen_chr.py $@
+
+$(ROM): $(SRC) $(CFG) $(CHR)
 	@mkdir -p build
-	$(CL65) -t $(TARGET) -g --obj-path build \
+	$(CL65) -t none -O -g -C $(CFG) --obj-path build \
 		-Wl --dbgfile,$(DBG) \
 		-o $@ $(SRC)
 	@echo "Built $@ ($(DBG))"
