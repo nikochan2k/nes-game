@@ -27,18 +27,96 @@ export function latToY(lat: number): number {
   return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * WORLD_CELLS;
 }
 
-// ---- 地物 ----
-export interface Feature {
-  rank: number;              // 塗る順 (小さい順に塗る)
-  area: number;              // 面の osm_class.id (0 = 面ではない)
-  road: number;              // 道路の id
-  rail: number;              // 線路の id
-  hwy: boolean;              // 高速道路
-  river: boolean;            // 川 (線で水を塗る)
-  bridge: boolean;
-  cliff: boolean;
-  parts: Float64Array[];     // [x0, y0, x1, y1, ...]。面は全リングを偶奇で塗る
-  minx: number; miny: number; maxx: number; maxy: number;
+// ---- 地物の置き場 ----
+// 数百万個の地物を JS のオブジェクトで持つとメモリが膨らむので、列ごとの型付き配列に入れる。
+// 座標は 1/64 マスの固定小数点 Int32 にして 1 本の配列 (アリーナ) に並べる。
+type TypedCtor<T> = new (n: number) => T;
+
+class Grow<T extends Float64Array | Int32Array | Uint32Array | Uint8Array> {
+  a: T;
+  n = 0;
+  constructor(private ctor: TypedCtor<T>, cap = 1024) { this.a = new ctor(cap); }
+  push(v: number) {
+    if (this.n === this.a.length) {
+      const b = new this.ctor(this.a.length * 2);
+      b.set(this.a as never);
+      this.a = b;
+    }
+    this.a[this.n++] = v;
+  }
+  view(): T { return this.a.subarray(0, this.n) as T; }
+}
+
+export const FIX = 64;                              // 座標の固定小数点 (1/64 マス。2^22 x 64 は Int32 に収まる)
+
+export interface FeatureAttrs {
+  rank: number; area?: number; road?: number; rail?: number;
+  hwy?: boolean; river?: boolean; bridge?: boolean; cliff?: boolean;
+}
+export const FL_HWY = 1, FL_RIVER = 2, FL_BRIDGE = 4, FL_CLIFF = 8;
+
+export class FeatureStore {
+  rank = new Grow(Uint8Array); area = new Grow(Uint8Array); road = new Grow(Uint8Array);
+  rail = new Grow(Uint8Array); flags = new Grow(Uint8Array);
+  start = new Grow(Int32Array); rings = new Grow(Int32Array);
+  minx = new Grow(Int32Array); miny = new Grow(Int32Array);
+  maxx = new Grow(Int32Array); maxy = new Grow(Int32Array);
+  private pts = new Grow(Int32Array, 1 << 16);      // 輪ごとに [点の数, x0, y0, x1, y1, ...]
+
+  get count(): number { return this.rank.n; }
+
+  /** rings は [x0, y0, x1, y1, ...] (マス座標) の配列。点が 2 つ未満の輪は捨てる。 */
+  add(at: FeatureAttrs, rings: ArrayLike<number>[]): boolean {
+    const startAt = this.pts.n;
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, n = 0;
+    for (const r of rings) {
+      const np = r.length >> 1;
+      if (np < 2) continue;
+      this.pts.push(np);
+      for (let i = 0; i < r.length; i += 2) {
+        const x = Math.round(r[i] * FIX), y = Math.round(r[i + 1] * FIX);
+        this.pts.push(x); this.pts.push(y);
+        if (x < minx) minx = x; if (x > maxx) maxx = x;
+        if (y < miny) miny = y; if (y > maxy) maxy = y;
+      }
+      n++;
+    }
+    if (n === 0) return false;
+    this.rank.push(at.rank); this.area.push(at.area ?? 0); this.road.push(at.road ?? 0);
+    this.rail.push(at.rail ?? 0);
+    this.flags.push((at.hwy ? FL_HWY : 0) | (at.river ? FL_RIVER : 0) | (at.bridge ? FL_BRIDGE : 0) | (at.cliff ? FL_CLIFF : 0));
+    this.start.push(startAt); this.rings.push(n);
+    this.minx.push(minx); this.miny.push(miny); this.maxx.push(maxx); this.maxy.push(maxy);
+    return true;
+  }
+
+  /** 窓 (マス座標) に重なるか。 */
+  overlaps(i: number, w: { x0: number; y0: number; x1: number; y1: number }): boolean {
+    return this.maxx.a[i] >= w.x0 * FIX && this.minx.a[i] < w.x1 * FIX
+      && this.maxy.a[i] >= w.y0 * FIX && this.miny.a[i] < w.y1 * FIX;
+  }
+
+  /** 地物 i の輪をマス座標に戻す。 */
+  partsOf(i: number): Float64Array[] {
+    const out: Float64Array[] = [], a = this.pts.a;
+    let p = this.start.a[i];
+    for (let r = 0; r < this.rings.a[i]; r++) {
+      const np = a[p++], xy = new Float64Array(np * 2);
+      for (let k = 0; k < np * 2; k++) xy[k] = a[p + k] / FIX;
+      out.push(xy);
+      p += np * 2;
+    }
+    return out;
+  }
+
+  /** 条件に合う地物の番号を rank の昇順 (同じ rank は追加順) に並べる。 */
+  order(pick: (i: number) => boolean): Uint32Array {
+    const buckets: number[][] = Array.from({ length: 256 }, () => []);
+    for (let i = 0; i < this.count; i++) if (pick(i)) buckets[this.rank.a[i]].push(i);
+    return Uint32Array.from(buckets.flat());
+  }
+  areas(): Uint32Array { return this.order((i) => this.area.a[i] !== 0); }
+  lines(): Uint32Array { return this.order((i) => this.area.a[i] === 0); }
 }
 
 // ---- タグの読み取り ----
@@ -173,18 +251,47 @@ export function assembleRings(ways: number[][]): number[][] {
 export interface LoadOptions {
   bbox: [number, number, number, number];     // w, s, e, n (度)
   margin?: number;                            // 外側に広げる度数 (既定 0.05)
+  log?: (msg: string) => void;                // 進行の表示
 }
 
-interface KeptWay { refs: number[]; area: number; line: LineAttrs | null; touches: boolean; coast: boolean }
-
 export interface Loaded {
-  features: Feature[];
+  store: FeatureStore;
   coast: Float64Array[];                      // 海岸線の鎖 (陸が進行方向の左)。マス座標
 }
 
+// ウェイの情報 (4 バイトに詰める): area | road << 8 | rail << 16 | bits << 24
+const W_HWY = 1, W_RIVER = 2, W_BRIDGE = 4, W_CLIFF = 8, W_LINE = 16, W_COAST = 32, W_TOUCH = 64, W_MEMBER = 128;
+
+/** id → 整数の表 (キーだけの IdMap と別に、値が必要な所用)。 */
+class IdIndex {
+  private keys: Float64Array;
+  private vals: Int32Array;
+  private mask: number;
+  constructor(cap: number) {
+    cap = 1 << Math.max(4, Math.ceil(Math.log2(cap * 2 + 1)));
+    this.mask = cap - 1;
+    this.keys = new Float64Array(cap);
+    this.vals = new Int32Array(cap);
+  }
+  private slot(id: number): number {
+    let h = (Math.imul((id >>> 0) ^ ((id / 4294967296) | 0), 0x9e3779b1) >>> 0) & this.mask;
+    while (this.keys[h] !== 0 && this.keys[h] !== id) h = (h + 1) & this.mask;
+    return h;
+  }
+  set(id: number, v: number) { const s = this.slot(id); this.keys[s] = id; this.vals[s] = v; }
+  get(id: number): number { const s = this.slot(id); return this.keys[s] === id ? this.vals[s] : -1; }
+}
+
+/**
+ * PBF を 3 回読む。メモリを抑えるため、ウェイと参照は型付き配列に詰め、
+ * ノード座標は「必要な ID を整列 → ID 順に並んだノードをマージ結合で読む」で表を持たずに集める。
+ */
 export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loaded> {
   const m = opt.margin ?? 0.05;
   const [w, s, e, n] = [opt.bbox[0] - m, opt.bbox[1] - m, opt.bbox[2] + m, opt.bbox[3] + m];
+  const log = opt.log ?? (() => {});
+  const mem = () => `rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB`;
+  const gc = () => (globalThis as { Bun?: { gc(force: boolean): void } }).Bun?.gc(true);
 
   // 1. リレーション
   const rels: { area: number; ways: { id: number; inner: boolean }[] }[] = [];
@@ -200,83 +307,122 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
       rels.push({ area, ways });
     },
   });
+  log(`リレーション ${rels.length} 件 (${mem()})`);
 
-  // 2. ノード (範囲内) とウェイ
-  const inBox = new IdMap(1 << 16, false);
-  const kept = new Map<number, KeptWay>();
-  const need = new IdMap(1 << 16, false);
+  // 2. ノード (範囲内か) とウェイ
+  let inBox: IdMap | null = new IdMap(1 << 16, false);
+  const wId = new Grow(Float64Array), wStart = new Grow(Int32Array), wLen = new Grow(Int32Array);
+  const wInfo = new Grow(Uint32Array), refs = new Grow(Float64Array, 1 << 16);
   await scanPbf(pbf, {
     node(id, lat, lon) {
-      if (lon >= w && lon <= e && lat >= s && lat <= n) inBox.set(id);
+      if (lon >= w && lon <= e && lat >= s && lat <= n) inBox!.set(id);
     },
-    way(id, tags, refs) {
+    way(id, tags, r) {
       const isMember = memberWays.has(id);
-      const closed = refs.length >= 4 && refs[0] === refs[refs.length - 1];
+      const closed = r.length >= 4 && r[0] === r[r.length - 1];
       const area = closed ? areaClassOf(tags) : 0;
       const line = lineAttrsOf(tags);
       const coast = tags.natural === "coastline";
       if (!isMember && !area && !line && !coast) return;
       let touches = false;
-      for (let i = 0; i < refs.length && !touches; i++) touches = inBox.has(refs[i]);
+      for (let i = 0; i < r.length && !touches; i++) touches = inBox!.has(r[i]);
       if (!isMember && !touches) return;
-      kept.set(id, { refs, area, line, touches, coast });
-      for (const r of refs) need.set(r);
+      const bits = (line?.hwy ? W_HWY : 0) | (line?.river ? W_RIVER : 0) | (line?.bridge ? W_BRIDGE : 0)
+        | (line?.cliff ? W_CLIFF : 0) | (line ? W_LINE : 0) | (coast ? W_COAST : 0)
+        | (touches ? W_TOUCH : 0) | (isMember ? W_MEMBER : 0);
+      wId.push(id); wStart.push(refs.n); wLen.push(r.length);
+      wInfo.push((area | ((line?.road ?? 0) << 8) | ((line?.rail ?? 0) << 16) | (bits << 24)) >>> 0);
+      for (const x of r) refs.push(x);
     },
   });
+  inBox = null;
+  const nWays = wId.n;
+  log(`ウェイ ${nWays} 本、参照 ${refs.n} (${mem()})`);
 
-  // 3. 必要なノードの座標
-  const coords = new IdMap(Math.max(1 << 16, 1 << Math.ceil(Math.log2(need.size * 2 + 1))));
+  // 必要なノードの ID を整列して重複を除く
+  const sorted = refs.view().slice().sort();
+  let nIds = 0;
+  for (let i = 0; i < sorted.length; i++) if (i === 0 || sorted[i] !== sorted[i - 1]) sorted[nIds++] = sorted[i];
+  const ids = sorted.subarray(0, nIds);
+  gc();
+  log(`必要ノード ${nIds} (${mem()})`);
+
+  // 3. 必要なノードの座標。PBF のノードは ID 順なので、整列した ID と同時に進める
+  const NONE = 2147483647;
+  const latI = new Int32Array(nIds).fill(NONE), lonI = new Int32Array(nIds);
+  let p = 0, last = 0;
   await scanPbf(pbf, {
     node(id, lat, lon) {
-      if (need.has(id)) coords.set(id, lat, lon);
+      if (id < last) throw new Error("PBF のノードが ID 順に並んでいない (osmium sort が必要)");
+      last = id;
+      while (p < nIds && ids[p] < id) p++;
+      if (p < nIds && ids[p] === id) { latI[p] = Math.round(lat * 1e7); lonI[p] = Math.round(lon * 1e7); }
     },
   });
+  gc();
+  log(`ノード座標 (${mem()})`);
 
-  const out: Feature[] = [];
-  const toXY = (refs: number[]): Float64Array => {
-    const xy: number[] = [];
-    for (const r of refs) {
-      const i = coords.find(r);
-      if (i >= 0) xy.push(lonToX(coords.lon[i] / 1e7), latToY(coords.lat[i] / 1e7));
+  const find = (id: number): number => {
+    let lo = 0, hi = nIds - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (ids[mid] < id) lo = mid + 1; else if (ids[mid] > id) hi = mid - 1; else return mid;
     }
-    return Float64Array.from(xy);
+    return -1;
   };
-  const push = (partial: Partial<Feature>, parts: Float64Array[]) => {
-    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-    for (const p of parts) {
-      for (let i = 0; i < p.length; i += 2) {
-        if (p[i] < minx) minx = p[i];
-        if (p[i] > maxx) maxx = p[i];
-        if (p[i + 1] < miny) miny = p[i + 1];
-        if (p[i + 1] > maxy) maxy = p[i + 1];
-      }
+  const toXY = (start: number, len: number): number[] => {
+    const xy: number[] = [], a = refs.a;
+    for (let k = start; k < start + len; k++) {
+      const i = find(a[k]);
+      if (i >= 0 && latI[i] !== NONE) xy.push(lonToX(lonI[i] / 1e7), latToY(latI[i] / 1e7));
     }
-    if (minx > maxx) return;
-    out.push({ rank: 0, area: 0, road: 0, rail: 0, hwy: false, river: false, bridge: false, cliff: false,
-      ...partial, parts, minx, miny, maxx, maxy });
+    return xy;
   };
 
+  const store = new FeatureStore();
   const coastWays: number[][] = [];
-  for (const k of kept.values()) {
-    if (!k.touches) continue;
-    if (k.coast) coastWays.push(k.refs);
-    if (k.area) {
-      const xy = toXY(k.refs);
-      if (xy.length >= 8) push({ area: k.area, rank: rankOf(k.area) }, [xy]);
+  const memberIdx = new IdIndex(memberWays.size);
+  for (let i = 0; i < nWays; i++) {
+    const info = wInfo.a[i], bits = info >>> 24, area = info & 255, road = (info >> 8) & 255, rail = (info >> 16) & 255;
+    if (bits & W_MEMBER) memberIdx.set(wId.a[i], i);
+    if (!(bits & W_TOUCH)) continue;
+    if (bits & W_COAST) coastWays.push(Array.from(refs.a.subarray(wStart.a[i], wStart.a[i] + wLen.a[i])));
+    if (area) {
+      const xy = toXY(wStart.a[i], wLen.a[i]);
+      if (xy.length >= 8) store.add({ rank: rankOf(area), area }, [xy]);
     }
-    if (k.line) {
-      const xy = toXY(k.refs);
+    if (bits & W_LINE) {
+      const xy = toXY(wStart.a[i], wLen.a[i]);
       if (xy.length >= 4) {
-        push({ ...k.line, rank: Math.max(rankOf(k.line.road), rankOf(k.line.rail)) }, [xy]);
+        store.add({ rank: Math.max(rankOf(road), rankOf(rail)), road, rail, hwy: !!(bits & W_HWY),
+          river: !!(bits & W_RIVER), bridge: !!(bits & W_BRIDGE), cliff: !!(bits & W_CLIFF) }, [xy]);
       }
     }
   }
   for (const r of rels) {
-    const ways = r.ways.map((x) => kept.get(x.id)).filter((x): x is KeptWay => !!x);
-    if (!ways.some((x) => x.touches)) continue;
-    const parts = assembleRings(ways.map((x) => x.refs)).map(toXY).filter((p) => p.length >= 8);
-    if (parts.length > 0) push({ area: r.area, rank: rankOf(r.area) }, parts);
+    const idx = r.ways.map((x) => memberIdx.get(x.id)).filter((i) => i >= 0);
+    if (!idx.some((i) => (wInfo.a[i] >>> 24) & W_TOUCH)) continue;
+    const rings = assembleRings(idx.map((i) => Array.from(refs.a.subarray(wStart.a[i], wStart.a[i] + wLen.a[i]))));
+    // 輪はノード ID 列。座標に直すには ID → 座標が要るので、一時的な ID 列を介さず直接引く
+    const parts = rings.map((ring) => {
+      const xy: number[] = [];
+      for (const id of ring) {
+        const k = find(id);
+        if (k >= 0 && latI[k] !== NONE) xy.push(lonToX(lonI[k] / 1e7), latToY(latI[k] / 1e7));
+      }
+      return xy;
+    }).filter((xy) => xy.length >= 8);
+    if (parts.length > 0) store.add({ rank: rankOf(r.area), area: r.area }, parts);
   }
-  const coast = assembleChains(coastWays).map(toXY).filter((c) => c.length >= 4);
-  return { features: out, coast };
+  const coast = assembleChains(coastWays).map((c) => {
+    const xy: number[] = [];
+    for (const id of c) {
+      const k = find(id);
+      if (k >= 0 && latI[k] !== NONE) xy.push(lonToX(lonI[k] / 1e7), latToY(latI[k] / 1e7));
+    }
+    return Float64Array.from(xy);
+  }).filter((c) => c.length >= 4);
+  gc();
+  log(`地物 ${store.count} (${mem()})`);
+  return { store, coast };
 }

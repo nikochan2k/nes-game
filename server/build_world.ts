@@ -58,9 +58,8 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   const win = { x0: bx0 * BLOCK_SIZE, y0: by0 * BLOCK_SIZE, x1: (bx1 + 1) * BLOCK_SIZE, y1: (by1 + 1) * BLOCK_SIZE };
   // 地物はブロックの範囲全体 (+margin) を読む
   const bbox: [number, number, number, number] = [xToLon(win.x0), yToLat(win.y1), xToLon(win.x1), yToLat(win.y0)];
-  const { features, coast } = await loadFeatures(o.pbf, { bbox, margin: o.margin });
-  const areas = features.filter((f) => f.area).sort((a, b) => a.rank - b.rank);
-  const lines = features.filter((f) => !f.area).sort((a, b) => a.rank - b.rank);
+  const { store, coast } = await loadFeatures(o.pbf, { bbox, margin: o.margin, log: lap });
+  const areas = store.areas(), lines = store.lines();
   lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本`);
 
   let land: Land[];
@@ -70,7 +69,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
     land = await readPolygons(o.land, [mx0, my0, mx1, my1]);
     lap(`陸地ポリゴン ${land.length} 件 (${o.land})`);
   } else {
-    const c = landFromCoast(coast, win, features.length > 0);
+    const c = landFromCoast(coast, win, store.count > 0);
     land = [{ parts: c.parts, minx: win.x0, miny: win.y0, maxx: win.x1, maxy: win.y1 }];
     lap(`海岸線から陸の輪 ${c.parts.length} 個${c.open ? ` (端が窓の中で途切れた海岸線 ${c.open} 本は無視)` : ""}`);
   }
@@ -82,7 +81,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   let blocks = 0;
   for (let ty = by0; ty <= by1; ty += o.tile) {
     for (let tx = bx0; tx <= bx1; tx += o.tile) {
-      painter.paint(tx, ty, land, areas, lines);
+      painter.paint(tx, ty, land, store, areas, lines);
       db.transaction(() => {
         for (let j = 0; j < o.tile; j++) {
           for (let i = 0; i < o.tile; i++) {

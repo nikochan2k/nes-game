@@ -3,7 +3,7 @@
  * 地物 (osmfeatures.ts) を z18 のマスに塗って (rasterize.ts)、ブロックにまとめる。
  */
 import { fillRings, linePath, type Window } from "./rasterize";
-import type { Feature } from "./osmfeatures";
+import { FL_BRIDGE, FL_CLIFF, FL_HWY, FL_RIVER, type FeatureStore } from "./osmfeatures";
 import {
   B3_BRIDGE, B3_CLIFF, B3_HWY, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
 } from "./worlddb";
@@ -81,7 +81,8 @@ export class Painter {
     this.cells = new Uint8Array(this.w * this.w * 4);
   }
 
-  paint(bx0: number, by0: number, land: Land[], areas: Feature[], lines: Feature[]): void {
+  /** areas / lines は store.areas() / store.lines() (rank の昇順の番号)。 */
+  paint(bx0: number, by0: number, land: Land[], store: FeatureStore, areas: Uint32Array, lines: Uint32Array): void {
     const { w, cells } = this;
     cells.fill(0);
     const ox = bx0 * BLOCK_SIZE, oy = by0 * BLOCK_SIZE;
@@ -93,22 +94,22 @@ export class Painter {
         fillRings(l.parts, win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y) + 3] |= LAND; });
       }
     }
-    for (const f of areas) {
-      if (overlaps(f, win)) {
-        fillRings(f.parts, win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y)] = f.area; });
-      }
+    for (const i of areas) {
+      if (!store.overlaps(i, win)) continue;
+      const id = store.area.a[i];
+      fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y)] = id; });
     }
-    for (const f of lines) {
-      if (!overlaps(f, win)) continue;
-      for (const p of f.parts) {
+    for (const i of lines) {
+      if (!store.overlaps(i, win)) continue;
+      const road = store.road.a[i], rail = store.rail.a[i], fl = store.flags.a[i];
+      const b3 = (fl & FL_HWY ? B3_HWY : 0) | (fl & FL_BRIDGE ? B3_BRIDGE : 0) | (fl & FL_CLIFF ? B3_CLIFF : 0);
+      for (const p of store.partsOf(i)) {
         linePath(p, win, (x, y) => {
           const o = at(x, y);
-          if (f.river && (cells[o] === 0 || rankOf(cells[o]) < waterRank)) cells[o] = WATER;
-          if (f.road) cells[o + 1] = f.road;
-          if (f.rail) cells[o + 2] = f.rail;
-          if (f.hwy) cells[o + 3] |= B3_HWY;
-          if (f.bridge) cells[o + 3] |= B3_BRIDGE;
-          if (f.cliff) cells[o + 3] |= B3_CLIFF;
+          if (fl & FL_RIVER && (cells[o] === 0 || rankOf(cells[o]) < waterRank)) cells[o] = WATER;
+          if (road) cells[o + 1] = road;
+          if (rail) cells[o + 2] = rail;
+          cells[o + 3] |= b3;
         });
       }
     }

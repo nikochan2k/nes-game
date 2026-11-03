@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Dem, decodePng, rgbToElevation } from "./dem";
-import { IdMap, areaClassOf, assembleRings, latToY, lineAttrsOf, loadFeatures, lonToX } from "./osmfeatures";
+import { FIX, FeatureStore, IdMap, areaClassOf, assembleRings, latToY, lineAttrsOf, loadFeatures, lonToX } from "./osmfeatures";
 import { scanPbf } from "./osmpbf";
 import { OsmSource } from "./osmsource";
 import { assembleChains, landFromCoast } from "./coast";
@@ -312,15 +312,16 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     await writeShp(shp, [[[[X0 - 500, Y0 - 500], [X0 + 128, Y0 - 500], [X0 + 128, Y0 + 700], [X0 - 500, Y0 + 700]]]]);
 
     const [w, n] = ll(10, 10), [e, s] = ll(250, 250);
-    const { features: feats } = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
-    const areas = feats.filter((f) => f.area).sort((a, b) => a.rank - b.rank);
-    const lines = feats.filter((f) => !f.area).sort((a, b) => a.rank - b.rank);
-    expect(feats.some((f) => f.minx > X0 + 1000)).toBe(false);
+    const { store } = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
+    let far = false;
+    for (let i = 0; i < store.count; i++) if (store.minx.a[i] > (X0 + 1000) * FIX) far = true;
+    expect(far).toBe(false);          // 範囲外の遠いウェイは読まれない
+    expect(store.count).toBe(9);
     const [mx0, my1] = cellToMeters(X0 - 300, Y0 - 300), [mx1, my0] = cellToMeters(X0 + 600, Y0 + 600);
     const land = await readPolygons(shp, [mx0, my0, mx1, my1]);
 
     const p = new Painter(1);
-    p.paint(bx, by, land, areas, lines);
+    p.paint(bx, by, land, store, store.areas(), store.lines());
     const cells = p.block(0, 0)!;
     const db = createDb(join(dir, "e2e.sqlite"));
     writeBlock(db, bx, by, cells);
