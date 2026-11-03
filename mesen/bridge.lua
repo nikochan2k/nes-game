@@ -2,7 +2,7 @@
 -- 実機では Raspberry Pi Pico がこの役を担う。
 --
 -- 事前に Mesen のスクリプトウィンドウの設定で "Allow network access" を有効にしておくこと。
--- サーバー: python3 server/mapserver.py  (既定 127.0.0.1:5555)
+-- サーバー: bun server/mapserver.ts  (既定 127.0.0.1:5555)
 
 local HOST, PORT = "127.0.0.1", 5555
 local SYNC = 0xA5

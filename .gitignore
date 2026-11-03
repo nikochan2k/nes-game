@@ -6,3 +6,4 @@
 *.nes
 *.dbg
 .DS_Store
+/node_modules/

@@ -1,5 +1,5 @@
 # NES toolchain (cc65 + GNU Make)
-#   make          build ROM + Mesen debug symbols (CHR は gfx/gen_chr.py から生成)
+#   make          build ROM + Mesen debug symbols (CHR は gfx/gen_chr.ts から生成)
 #   make run      open in Mesen if installed, else the default app
 #   make server   run the map server (Raspberry Pi 側と同じもの)
 #   make bridge   open in Mesen with the serial bridge script (要 make server)
@@ -9,6 +9,7 @@
 CL65     ?= cl65
 CA65     ?= ca65
 LD65     ?= ld65
+BUN      ?= bun
 SRC      := src/crt0.s src/ppu.s src/main.c src/link.c src/worldgen.c src/chr.s
 CFG      := cfg/field.cfg
 CHR      := gfx/tiles.chr
@@ -31,8 +32,8 @@ FAMISTUDIO_APP := $(firstword $(wildcard \
 
 all: $(ROM)
 
-$(CHR): gfx/gen_chr.py
-	python3 gfx/gen_chr.py $@
+$(CHR): gfx/gen_chr.ts
+	$(BUN) gfx/gen_chr.ts $@
 
 $(ROM): $(SRC) $(wildcard src/*.h) $(CFG) $(CHR)
 	@mkdir -p build
@@ -57,10 +58,10 @@ else
 endif
 
 server:
-	python3 server/mapserver.py -v
+	$(BUN) server/mapserver.ts -v
 
 test:
-	cd server && python3 -m unittest -v
+	$(BUN) test server
 
 clean:
 	rm -rf build
@@ -71,6 +72,9 @@ doctor:
 	@command -v $(CL65) && $(CL65) --version || echo "MISSING: cl65  (brew install cc65)"
 	@command -v $(CA65) || echo "MISSING: ca65"
 	@command -v $(LD65) || echo "MISSING: ld65"
+	@echo
+	@echo "== runtime (Bun: 地図サーバーと CHR 生成) =="
+	@command -v $(BUN) && $(BUN) --version || echo "MISSING: bun  (curl -fsSL https://bun.sh/install | bash)"
 	@echo
 	@echo "== build (Make) =="
 	@make --version | head -1
