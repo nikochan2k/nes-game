@@ -1,6 +1,7 @@
 /build/
 /tools/
 /tmp/
+/data/
 *.o
 *.nes
 *.dbg
