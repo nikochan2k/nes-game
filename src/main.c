@@ -1,5 +1,5 @@
 /* 現代の街道を歩くフィールド移動デモ (4 画面 = 2x2)。
- * 画面端を越えるとその画面のネームテーブルを描き直す。 */
+ * 4 画面ミラーでワールド全体を VRAM に載せ、カメラをスクロールレジスタで動かす。 */
 
 #define PPU_CTRL   (*(volatile unsigned char *)0x2000)
 #define PPU_MASK   (*(volatile unsigned char *)0x2001)
@@ -17,10 +17,9 @@
 
 #define MAP_W 32
 #define MAP_H 28
-#define SCR_W 16               /* 1 画面 = 16x14 マス (1 マス = 16x16 px) */
-#define SCR_H 14
+#define SCR_W 16               /* 1 画面 = 16x15 マス (1 マス = 16x16 px) */
+#define SCR_H 15
 #define STEP_PX 2              /* 1 フレームの移動量 (16px / 2 = 8 フレーム/マス) */
-#define SCROLL_Y 232           /* 上下 8px ずつ余白にして NTSC の可視範囲 224 行に収める */
 
 enum { T_GRASS, T_FOREST, T_MOUNTAIN, T_ROCK, T_WATER,
        T_BRIDGE_H, T_BRIDGE_V, T_ROAD_H, T_ROAD_V, T_ROAD_X };
@@ -78,10 +77,13 @@ static unsigned char cx, cy;   /* 現在のマス */
 static signed char ox, oy;     /* 描画上の残り移動量 (px) */
 static unsigned char dir;
 static unsigned char toggle;   /* 歩くたびに反転 (足の左右) */
-static unsigned char hold;     /* 画面切り替え直後の待ち */
+static int cam_x, cam_y;       /* カメラ左上のワールド座標 (px) */
 
 static unsigned char terrain(unsigned char x, unsigned char y)
 {
+    if (x >= MAP_W || y >= MAP_H) {
+        return T_GRASS;             /* NT の余り (最下段 2 行ぶん) */
+    }
     switch (world[y][x]) {
     case 'T': return T_FOREST;
     case '^': return T_MOUNTAIN;
@@ -113,45 +115,58 @@ static unsigned char read_pad(void)
     return v;
 }
 
-/* 画面 (sx, sy) をネームテーブル 0 に描く。描画は一度止める。 */
-static void draw_screen(unsigned char sx, unsigned char sy)
+/* ワールド全体を 4 画面分のネームテーブルに描く (描画は止める)。
+ * NT0=左上 NT1=右上 NT2=左下 NT3=右下。NT 内は 16x15 マス。 */
+static void draw_world(void)
 {
-    unsigned char bx = sx * SCR_W, by = sy * SCR_H;
-    unsigned char x, y, half, t, a;
+    unsigned char nt, bx, by, x, y, half, t, a;
 
     PPU_MASK = 0;
     x = PPU_STATUS;
-    PPU_ADDR = 0x20;
-    PPU_ADDR = 0x00;
-    for (y = 0; y < SCR_H; ++y) {
-        for (half = 0; half < 2; ++half) {
-            for (x = 0; x < SCR_W; ++x) {
-                t = terrain(bx + x, by + y) * 4 + half * 2;
-                PPU_DATA = t;
-                PPU_DATA = t + 1;
+    for (nt = 0; nt < 4; ++nt) {
+        bx = (nt & 1) * SCR_W;
+        by = (nt >> 1) * SCR_H;
+        PPU_ADDR = 0x20 + nt * 4;
+        PPU_ADDR = 0x00;
+        for (y = 0; y < SCR_H; ++y) {
+            for (half = 0; half < 2; ++half) {
+                for (x = 0; x < SCR_W; ++x) {
+                    t = terrain(bx + x, by + y) * 4 + half * 2;
+                    PPU_DATA = t;
+                    PPU_DATA = t + 1;
+                }
             }
         }
-    }
-    for (x = 0; x < 64; ++x) {      /* 余りの 2 タイル行 */
-        PPU_DATA = 0;
-    }
-    for (y = 0; y < 8; ++y) {       /* 属性: 1 マス (16x16) ごとにパレット */
-        for (x = 0; x < 8; ++x) {
-            a = 0;
-            if (y < SCR_H / 2) {
+        for (y = 0; y < 8; ++y) {   /* 属性: 1 マス (16x16) ごとにパレット */
+            for (x = 0; x < 8; ++x) {
                 a = tile_pal[terrain(bx + x * 2, by + y * 2)]
                   | tile_pal[terrain(bx + x * 2 + 1, by + y * 2)] << 2
                   | tile_pal[terrain(bx + x * 2, by + y * 2 + 1)] << 4
                   | tile_pal[terrain(bx + x * 2 + 1, by + y * 2 + 1)] << 6;
+                PPU_DATA = a;
             }
-            PPU_DATA = a;
         }
     }
-    wait_vblank();                  /* スクロール設定は vblank 内で */
-    x = PPU_STATUS;
-    PPU_SCROLL = 0;
-    PPU_SCROLL = SCROLL_Y;
-    PPU_MASK = 0x1E;
+}
+
+/* プレイヤーが画面中央に来るようカメラを置く (ワールド端では止める) */
+static void update_camera(void)
+{
+    cam_x = (cx * 16 + ox) - 120;
+    cam_y = (cy * 16 + oy) - 112;
+    if (cam_x < 0) cam_x = 0;
+    if (cam_x > MAP_W * 16 - 256) cam_x = MAP_W * 16 - 256;
+    if (cam_y < 0) cam_y = 0;
+    if (cam_y > MAP_H * 16 - 240) cam_y = MAP_H * 16 - 240;
+}
+
+/* vblank 中に呼ぶ */
+static void apply_scroll(void)
+{
+    unsigned char x = PPU_STATUS;
+    PPU_CTRL = 0x88 | (cam_x >= 256 ? 1 : 0);
+    PPU_SCROLL = (unsigned char)cam_x;      /* 下位 8bit。256 以上はベースNTで表現 */
+    PPU_SCROLL = (unsigned char)cam_y;      /* cam_y は最大 208 < 240 */
 }
 
 static void draw_player(void)
@@ -159,8 +174,8 @@ static void draw_player(void)
     unsigned char moving = (ox | oy) != 0;
     signed char m = ox ? ox : oy;
     unsigned char frame, flip, tl, tr, bl, br;
-    int px = (cx & (SCR_W - 1)) * 16 + ox;
-    int py = 8 + (cy % SCR_H) * 16 + oy - 1;
+    int px = cx * 16 + ox - cam_x;
+    int py = cy * 16 + oy - cam_y - 1;
 
     if (m < 0) {
         m = -m;
@@ -189,10 +204,6 @@ static void update_player(unsigned char pad)
 {
     unsigned char nx = cx, ny = cy;
 
-    if (hold) {
-        --hold;
-        return;
-    }
     if (ox || oy) {
         if (ox < 0) ox += STEP_PX; else if (ox > 0) ox -= STEP_PX;
         if (oy < 0) oy += STEP_PX; else if (oy > 0) oy -= STEP_PX;
@@ -204,21 +215,15 @@ static void update_player(unsigned char pad)
     else if (pad & PAD_RIGHT) { dir = DIR_RIGHT; ++nx; }
     else return;
 
-    if (nx >= MAP_W || ny >= MAP_H || !passable(nx, ny)) {
-        return;                     /* 範囲外 (unsigned の -1 含む) / 通行不可 */
+    /* 範囲外 (unsigned の -1 含む) / 通行不可。最上段は OAM Y=-1 になるため入れない */
+    if (nx >= MAP_W || ny >= MAP_H || ny == 0 || !passable(nx, ny)) {
+        return;
     }
     toggle ^= 1;
-    if (nx / SCR_W != cx / SCR_W || ny / SCR_H != cy / SCR_H) {
-        cx = nx;
-        cy = ny;
-        draw_screen(cx / SCR_W, cy / SCR_H);
-        hold = 6;
-    } else {
-        ox = (signed char)(cx - nx) * 16;
-        oy = (signed char)(cy - ny) * 16;
-        cx = nx;
-        cy = ny;
-    }
+    ox = (signed char)(cx - nx) * 16;
+    oy = (signed char)(cy - ny) * 16;
+    cx = nx;
+    cy = ny;
 }
 
 void main(void)
@@ -238,11 +243,18 @@ void main(void)
     cy = 8;
     dir = DIR_DOWN;
     PPU_CTRL = 0x88;                /* NMI 有効 / スプライトはパターンテーブル 1 */
-    draw_screen(cx / SCR_W, cy / SCR_H);
+    draw_world();
+    update_camera();
+    draw_player();
+    wait_vblank();
+    apply_scroll();
+    PPU_MASK = 0x1E;                /* 以降の PPU_CTRL は apply_scroll が毎フレーム設定 */
 
     for (;;) {
         wait_vblank();
+        apply_scroll();             /* 前フレームの状態 = 今 DMA された OAM と一致 */
         update_player(read_pad());
+        update_camera();
         draw_player();
     }
 }

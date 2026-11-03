@@ -1,4 +1,4 @@
-; 最小の NES 起動コード (mapper 0, 垂直ミラー)。
+; 最小の NES 起動コード (mapper 0, 4 画面ミラー)。
 ; NMI で OAM DMA(シャドウ $0200)とフレームカウンタ更新だけ行う。
 
 .export __STARTUP__ : absolute = 1
@@ -15,7 +15,7 @@
     .byte "NES", $1A
     .byte 2             ; PRG 16K x 2
     .byte 1             ; CHR 8K x 1
-    .byte $01           ; 垂直ミラー / mapper 0
+    .byte $08           ; 4 画面ミラー / mapper 0
     .byte 0
     .res 8, 0
 
