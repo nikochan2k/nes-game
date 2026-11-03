@@ -1,0 +1,7 @@
+/build/
+/tools/
+/tmp/
+*.o
+*.nes
+*.dbg
+.DS_Store

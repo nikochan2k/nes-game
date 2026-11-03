@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "NES: build",
+      "type": "shell",
+      "command": "make",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$ca65", "$ld65"]
+    },
+    {
+      "label": "NES: run",
+      "type": "shell",
+      "command": "make run",
+      "group": "none",
+      "problemMatcher": []
+    }
+  ]
+}

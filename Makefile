@@ -1,0 +1,77 @@
+# NES toolchain (cc65 + GNU Make)
+#   make          build ROM + Mesen debug symbols
+#   make run      open in Mesen if installed, else the default app
+#   make doctor   check recommended tools
+
+CL65     ?= cl65
+CA65     ?= ca65
+LD65     ?= ld65
+SRC      := src/main.c
+ROM      := build/hello.nes
+DBG      := build/hello.dbg
+TARGET   := nes
+
+MESEN_APP := $(firstword $(wildcard \
+	/Applications/Mesen.app \
+	$(HOME)/Applications/Mesen.app \
+	/Applications/Mesen*.app \
+	$(HOME)/Applications/Mesen*.app \
+))
+
+FAMISTUDIO_APP := $(firstword $(wildcard \
+	/Applications/FamiStudio.app \
+	$(HOME)/Applications/FamiStudio.app \
+))
+
+.PHONY: all clean run doctor
+
+all: $(ROM)
+
+$(ROM): $(SRC)
+	@mkdir -p build
+	$(CL65) -t $(TARGET) -g --obj-path build \
+		-Wl --dbgfile,$(DBG) \
+		-o $@ $(SRC)
+	@echo "Built $@ ($(DBG))"
+
+run: $(ROM)
+ifeq ($(MESEN_APP),)
+	open $(ROM)
+else
+	open -a "$(MESEN_APP)" $(ROM)
+endif
+
+clean:
+	rm -rf build
+	rm -f src/*.o
+
+doctor:
+	@echo "== assembler / linker (cc65; NESASM は使わない) =="
+	@command -v $(CL65) && $(CL65) --version || echo "MISSING: cl65  (brew install cc65)"
+	@command -v $(CA65) || echo "MISSING: ca65"
+	@command -v $(LD65) || echo "MISSING: ld65"
+	@echo
+	@echo "== build (Make) =="
+	@make --version | head -1
+	@echo
+	@echo "== emulator (Mesen) =="
+	@if [ -n "$(MESEN_APP)" ]; then echo "$(MESEN_APP)"; else \
+		echo "MISSING: Mesen.app"; \
+		echo "  Intel Mac: https://github.com/SourMesen/Mesen2/releases"; \
+		echo "  先に SDL2 が必要 (この Mac には入っている)"; \
+	fi
+	@echo
+	@echo "== graphics (YY-CHR / NEXXT は Windows) =="
+	@echo "  タイルは gfx/ に CHR を置く。Mac では NEXXT を Wine で使うか、"
+	@echo "  r-chr / PPUX などのネイティブ代替を使う。"
+	@echo
+	@echo "== sound (FamiStudio) =="
+	@if [ -n "$(FAMISTUDIO_APP)" ]; then echo "$(FAMISTUDIO_APP)"; else \
+		echo "MISSING: FamiStudio.app"; \
+		echo "  https://famistudio.org/doc/install/  (macOS zip + .NET 8 x64)"; \
+		echo "  出力は audio/ へ"; \
+	fi
+	@echo
+	@echo "== editor =="
+	@echo "  Cursor (VS Code 互換)。拡張: tlgkccampbell.code-ca65"
+	@echo "rom: $(ROM)"

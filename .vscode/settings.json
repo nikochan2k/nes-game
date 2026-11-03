@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.s": "ca65",
+    "*.asm": "ca65",
+    "*.inc": "ca65"
+  }
+}
