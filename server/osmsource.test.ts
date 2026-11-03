@@ -13,7 +13,7 @@ const FARM = classId("landuse", "farmland"), URBAN = classId("landuse", "residen
 const WATER = classId("natural", "water"), SEA = classId("sea", "sea");
 const BUILDING = classId("building", "yes"), WETLAND = classId("natural", "wetland");
 const SCREE = classId("natural", "scree"), ROCKAREA = classId("natural", "bare_rock");
-const RESIDENTIAL = classId("highway", "residential"), PRIMARY = classId("highway", "primary");
+const RESIDENTIAL = classId("highway", "residential"), TRUNK = classId("highway", "trunk"), TERTIARY = classId("highway", "tertiary");
 const FOOTWAY = classId("highway", "footway"), RAIL = classId("railway", "rail");
 
 /** 全マス area の 256x256 ブロック。 */
@@ -41,7 +41,7 @@ beforeAll(() => {
 
   // ブロック A: 草原に道路・線路・水・建物など
   const a = blockOf(GRASS);
-  for (let x = 0; x < 256; x++) put(a, x, 10, undefined, RESIDENTIAL);       // 横の道路
+  for (let x = 0; x < 256; x++) put(a, x, 10, undefined, TERTIARY);          // 横の道路 (z16 まで出る)
   for (let y = 0; y < 256; y++) put(a, 20, y, undefined, RESIDENTIAL);       // 縦の道路 (x=20)
   for (let y = 0; y < 256; y++) put(a, 100, y, undefined, undefined, RAIL);  // 縦の線路 (x=100)
   for (let x = 40; x < 50; x++) { put(a, x, 9, WATER); put(a, x, 10, WATER); put(a, x, 11, WATER); }
@@ -74,7 +74,7 @@ beforeAll(() => {
   // 北のブロック列: 高速でない主要道路が東西に連続 (z10 の代表値の確認用)
   for (let i = 0; i < 3; i++) {
     const c = blockOf(FOREST);
-    put(c, 3, 3, undefined, PRIMARY);
+    put(c, 3, 3, undefined, TRUNK);
     writeBlock(db, BX + i, BY - 3, c);
   }
   db.close();

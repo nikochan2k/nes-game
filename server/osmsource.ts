@@ -28,14 +28,17 @@ const CAT_TERRAIN: Record<string, number> = {
 
 // ---- ズームごとのしきい値 (8.3 の表。rank は worlddb.ts の CLASSES) ----
 const NONE = 1000;
+/** [z の下限, 出す一般道路の rank の下限]。上から順に見て最初に当てはまるもの。 */
+// 都心 (東京駅・渋谷・豊洲) で道路マスが画面の 20〜50% に収まるように、プラン 8.3 の初期値から 3 段上げた
+export const ROAD_MIN: [number, number][] = [[18, 1], [17, 45], [16, 60], [15, 70], [13, 80], [6, 90]];
+/** 線路。 */
+export const RAIL_MIN: [number, number][] = [[15, 1], [12, 70], [6, 90]];
+
+const pick = (t: [number, number][], z: number) => t.find(([zmin]) => z >= zmin)?.[1] ?? NONE;
 /** この rank 以上の一般道路を出す。 */
-export function roadMin(z: number): number {
-  return z >= 18 ? 1 : z >= 15 ? 35 : z >= 12 ? 60 : z >= 9 ? 80 : z >= 6 ? 90 : NONE;
-}
+export const roadMin = (z: number) => pick(ROAD_MIN, z);
 /** この rank 以上の線路を出す。 */
-export function railMin(z: number): number {
-  return z >= 15 ? 1 : z >= 12 ? 70 : z >= 6 ? 90 : NONE;
-}
+export const railMin = (z: number) => pick(RAIL_MIN, z);
 const hwyShown = (z: number) => z >= 6;
 
 const ROCK_PCT = 30, MOUNT_PCT = 40;   // 集約時の割合のしきい値 (案)。8.2
