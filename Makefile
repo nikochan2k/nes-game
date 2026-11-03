@@ -1,6 +1,9 @@
 # NES toolchain (cc65 + GNU Make)
 #   make          build ROM + Mesen debug symbols (CHR は gfx/gen_chr.py から生成)
 #   make run      open in Mesen if installed, else the default app
+#   make server   run the map server (Raspberry Pi 側と同じもの)
+#   make bridge   open in Mesen with the serial bridge script (要 make server)
+#   make test     run the map server tests
 #   make doctor   check recommended tools
 
 CL65     ?= cl65
@@ -24,7 +27,7 @@ FAMISTUDIO_APP := $(firstword $(wildcard \
 	$(HOME)/Applications/FamiStudio.app \
 ))
 
-.PHONY: all clean run doctor
+.PHONY: all clean run bridge server test doctor
 
 all: $(ROM)
 
@@ -44,6 +47,20 @@ ifeq ($(MESEN_APP),)
 else
 	open -a "$(MESEN_APP)" $(ROM)
 endif
+
+# Mesen のスクリプトウィンドウで "Allow network access" を有効にしておくこと
+bridge: $(ROM)
+ifeq ($(MESEN_APP),)
+	@echo "Mesen.app が見つからない"; exit 1
+else
+	"$(MESEN_APP)/Contents/MacOS/Mesen" $(ROM) mesen/bridge.lua
+endif
+
+server:
+	python3 server/mapserver.py -v
+
+test:
+	cd server && python3 -m unittest -v
 
 clean:
 	rm -rf build

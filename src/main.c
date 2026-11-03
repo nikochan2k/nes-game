@@ -1,6 +1,7 @@
-/* 現代の街道を歩く、無限に広がるフィールド移動デモ。
+/* 現代の街道を歩く、世界地図フィールド移動デモ。
  * 4 画面ミラーの VRAM (32x30 マスの輪) をカメラ位置に合わせて少しずつ描き足す。
- * 地形は link_fetch() で外部から受け取る。 */
+ * 地形は link_fetch() で外部 (地図サーバー) から z/x/y 指定で受け取る。
+ * A でズームイン、B でズームアウト。 */
 
 #include "terrain.h"
 #include "link.h"
@@ -14,6 +15,8 @@
 #define JOY1       (*(volatile unsigned char *)0x4016)
 #define OAM        ((volatile unsigned char *)0x0200)
 
+#define PAD_A     0x80
+#define PAD_B     0x40
 #define PAD_UP    0x08
 #define PAD_DOWN  0x04
 #define PAD_LEFT  0x02
@@ -50,19 +53,32 @@ static const unsigned char palette[32] = {
     0x1A, 0x0F, 0x36, 0x16
 };
 
-static unsigned cx, cy;        /* 現在のマス (16bit で巻き戻る) */
+typedef unsigned long u32;
+
+#define Z_MIN 1                /* 1 辺は 2^(z+4) マス。z=1 でも 32 マスあり、輪より狭くならない */
+#define Z_MAX 20               /* 2^24 マスで 24bit にちょうど収まる */
+#define START_Z 10
+#define START_X 14549UL        /* 東京 (経度 139.69 / 緯度 35.69) の z=10 でのマス座標 */
+#define START_Y 6451UL
+
+static u32 cx, cy;             /* 現在のマス (世界全体での座標) */
+static u32 world_mask;         /* (1 << (z + 4)) - 1 */
+static unsigned char z;        /* ズームレベル */
+static unsigned char sy_slot;  /* cy % RING_H。% は遅いので増減で追う */
+static unsigned char prev_pad;
+static unsigned char reload;   /* ズーム変更で VRAM を作り直す */
 static signed char ox, oy;     /* 描画上の残り移動量 (px) */
 static unsigned char dir;
 static unsigned char toggle;   /* 歩くたびに反転 (足の左右) */
 static int scr_x, scr_y;       /* スクロール位置 (輪の中の px: 0..511 / 0..479) */
 
 /* 進行方向の先の地形を VRAM から読み戻して通行可否を決める */
-static unsigned probe_x, probe_y, probe_addr;   /* probe_addr: 先のマスの VRAM アドレス */
+static unsigned probe_addr;    /* 進行方向の先のマスの VRAM アドレス */
 static unsigned char probe, probe_dir;
 
 /* 1 本ぶん (行または列) の描き足しジョブ */
 static unsigned char job_buf[LINE_MAX];
-static unsigned job_x, job_y;           /* 取得開始のワールド座標 */
+static u32 job_x, job_y;                /* 取得開始のワールド座標 */
 static unsigned char job_n, job_fetched, job_done, job_vert, job_sx, job_sy;
 
 static unsigned char attr_shadow[256];   /* 属性テーブルの控え (NT0..3 の 64 バイトずつ) */
@@ -129,13 +145,13 @@ static void queue_cell(unsigned char sx, unsigned char sy, unsigned char t)
 extern void flush_cells(void);
 
 /* (x, y) から n マスぶんを描き足すジョブを登録する (取得は job_fetch で少しずつ) */
-static void job_start(unsigned x, unsigned y, unsigned char vert, unsigned char n)
+static void job_start(u32 x, u32 y, unsigned char y_slot, unsigned char vert, unsigned char n)
 {
     job_x = x;
     job_y = y;
     job_fetched = 0;
     job_sx = x & (RING_W - 1);
-    job_sy = y % RING_H;
+    job_sy = y_slot;
     job_vert = vert;
     job_n = n;
     job_done = 0;
@@ -149,7 +165,8 @@ static void job_fetch(unsigned char max)
         k = max;
     }
     if (k) {
-        link_fetch(job_vert ? job_x : job_x + job_fetched,
+        link_fetch(z,
+                   job_vert ? job_x : job_x + job_fetched,
                    job_vert ? job_y + job_fetched : job_y,
                    job_vert, k, job_buf + job_fetched);
         job_fetched += k;
@@ -243,24 +260,33 @@ static void advance(void)
     if (scr_y >= RING_H * 16) scr_y -= RING_H * 16;
 }
 
+/* sy_slot から d マス (-HALF_H..HALF_H) ずれた行の輪の位置 */
+static unsigned char slot_off(signed char d)
+{
+    unsigned char t = sy_slot + RING_H + d;
+    return t >= RING_H ? t - RING_H : t;
+}
+
 static void begin_step(unsigned char d)
 {
     switch (d) {
     case DIR_UP:
         --cy; oy = 16;
-        job_start(cx - HALF_W, cy - HALF_H, 0, 2 * HALF_W + 1);
+        sy_slot = slot_off(-1);
+        job_start(cx - HALF_W, cy - HALF_H, slot_off(-HALF_H), 0, 2 * HALF_W + 1);
         break;
     case DIR_DOWN:
         ++cy; oy = -16;
-        job_start(cx - HALF_W, cy + HALF_H, 0, 2 * HALF_W + 1);
+        sy_slot = slot_off(1);
+        job_start(cx - HALF_W, cy + HALF_H, slot_off(HALF_H), 0, 2 * HALF_W + 1);
         break;
     case DIR_LEFT:
-        --cx; ox = 16;
-        job_start(cx - HALF_W, cy - HALF_H, 1, 2 * HALF_H + 1);
+        cx = (cx - 1) & world_mask; ox = 16;
+        job_start(cx - HALF_W, cy - HALF_H, slot_off(-HALF_H), 1, 2 * HALF_H + 1);
         break;
     default:
-        ++cx; ox = -16;
-        job_start(cx + HALF_W, cy - HALF_H, 1, 2 * HALF_H + 1);
+        cx = (cx + 1) & world_mask; ox = -16;
+        job_start(cx + HALF_W, cy - HALF_H, slot_off(-HALF_H), 1, 2 * HALF_H + 1);
         break;
     }
     toggle ^= 1;
@@ -282,6 +308,16 @@ static void update_player(unsigned char pad)
     else if (pad & PAD_LEFT)  want = DIR_LEFT;
     else if (pad & PAD_RIGHT) want = DIR_RIGHT;
 
+    if (!(prev_pad & PAD_A) && (pad & PAD_A) && z < Z_MAX) {
+        ++z; cx <<= 1; cy <<= 1; reload = 1;
+    } else if (!(prev_pad & PAD_B) && (pad & PAD_B) && z > Z_MIN) {
+        --z; cx >>= 1; cy >>= 1; reload = 1;
+    }
+    prev_pad = pad;
+    if (reload) {
+        return;
+    }
+
     if (probe == PROBE_OK && want == probe_dir) {
         if (job_done < job_n) {
             return;                 /* 前のジョブが終わるまで待つ */
@@ -297,31 +333,52 @@ static void update_player(unsigned char pad)
     }
     dir = want;                     /* その場で向きだけ変える */
     probe_dir = want;
-    probe_x = cx;
-    probe_y = cy;
-    if (want == DIR_UP)         --probe_y;
-    else if (want == DIR_DOWN)  ++probe_y;
-    else if (want == DIR_LEFT)  --probe_x;
-    else                        ++probe_x;
-    probe_addr = cell_addr(probe_x & (RING_W - 1), probe_y % RING_H);
+    if ((want == DIR_UP && cy == 0) || (want == DIR_DOWN && cy == world_mask)) {
+        return;                     /* 極の先には進めない */
+    }
+    if (want == DIR_UP)         probe_addr = cell_addr(cx & (RING_W - 1), slot_off(-1));
+    else if (want == DIR_DOWN)  probe_addr = cell_addr(cx & (RING_W - 1), slot_off(1));
+    else if (want == DIR_LEFT)  probe_addr = cell_addr((cx - 1) & (RING_W - 1), sy_slot);
+    else                        probe_addr = cell_addr((cx + 1) & (RING_W - 1), sy_slot);
     probe = PROBE_REQ;
 }
 
-/* 起動時: 中心の周り (19x17 マス) を描画停止中にまとめて描く */
+/* 中心の周り (19x17 マス) を描画停止中にまとめて描く */
 static void init_world(void)
 {
-    unsigned y;
+    signed char dy;
     unsigned char n;
 
     PPU_MASK = 0;
-    for (y = cy - HALF_H; y != cy + HALF_H + 1; ++y) {
-        job_start(cx - HALF_W, y, 0, 2 * HALF_W + 1);
+    for (dy = -HALF_H; dy <= HALF_H; ++dy) {
+        job_start(cx - HALF_W, cy + dy, slot_off(dy), 0, 2 * HALF_W + 1);
         job_fetch(LINE_MAX);
         for (n = 0; n < 4; ++n) {
             stream_cells(QCELLS);
             flush_cells();
         }
     }
+}
+
+/* z, cx, cy から VRAM とスクロールを作り直して表示を始める */
+static void reload_world(void)
+{
+    PPU_MASK = 0;
+    world_mask = (1UL << (z + 4)) - 1;
+    cx &= world_mask;
+    sy_slot = cy % RING_H;
+    ox = oy = 0;
+    probe = PROBE_NONE;
+    queue_n = 0;
+    job_n = job_fetched = job_done = 0;
+    scr_x = ((cx & (RING_W - 1)) * 16 + RING_W * 16 - PLAYER_X) & (RING_W * 16 - 1);
+    scr_y = (sy_slot * 16 + RING_H * 16 - (PLAYER_Y + 1)) % (RING_H * 16);
+    init_world();
+    draw_player();
+    wait_vblank();
+    apply_scroll();
+    PPU_MASK = 0x1E;
+    reload = 0;
 }
 
 void main(void)
@@ -337,18 +394,12 @@ void main(void)
         PPU_DATA = palette[i];
     }
 
-    cx = 1024;                      /* 道路の交差点から始める */
-    cy = 1024;
+    z = START_Z;
+    cx = START_X;
+    cy = START_Y;
     dir = DIR_DOWN;
-    scr_x = ((cx & (RING_W - 1)) * 16 + RING_W * 16 - PLAYER_X) & (RING_W * 16 - 1);
-    scr_y = ((cy % RING_H) * 16 + RING_H * 16 - (PLAYER_Y + 1)) % (RING_H * 16);
-
     PPU_CTRL = 0x88;                /* NMI 有効 / スプライトはパターンテーブル 1 */
-    init_world();
-    draw_player();
-    wait_vblank();
-    apply_scroll();
-    PPU_MASK = 0x1E;
+    reload_world();
 
     for (;;) {
         wait_vblank();
@@ -358,10 +409,13 @@ void main(void)
         job_fetch(FETCH_PER_FRAME);
         stream_cells(CELLS_PER_FRAME);
         update_player(read_pad());
+        if (reload) {
+            reload_world();
+        }
         draw_player();
 #ifdef PROFILE
         ++DBG(0);
-        DBG(1) = cx; DBG(2) = cx >> 8; DBG(3) = cy; DBG(4) = cy >> 8;
+        DBG(1) = cx; DBG(2) = cx >> 8; DBG(3) = cx >> 16; DBG(4) = cy; DBG(5) = cy >> 8; DBG(6) = cy >> 16; DBG(7) = z;
 #endif
     }
 }
