@@ -86,7 +86,7 @@ class PyRandom {
   }
 }
 
-// ---- BG (pal0: 草/森, pal1: 山, pal2: 岩/道路, pal3: 水/橋) ----
+// ---- BG (pal0: 緑, pal1: 茶/白, pal2: 灰, pal3: 青。割り当ては main.c の tile_pal) ----
 function grass(): Grid {
   const g = grid();
   for (const [x, y] of [[3, 2], [11, 5], [6, 9], [13, 12], [2, 13]]) {
@@ -194,9 +194,136 @@ function roadX(): Grid {
   return g;
 }
 
-// 並び順は main.c の T_* と一致させる
+// pal0=緑 (1 濃緑 2 薄緑 3 茶) / pal1=茶/白 (1 茶 2 濃茶 3 白) / pal2=灰 (1 濃灰 2 灰 3 白)
+function urban(): Grid {
+  const g = grid(2);
+  for (let i = 0; i < 16; i++) {
+    g[0][i] = g[8][i] = 1;
+    g[i][0] = g[i][8] = 1;
+  }
+  for (const [x, y] of [[3, 3], [11, 3], [3, 11], [11, 11]]) {
+    put(g, x, y, 3);
+  }
+  return g;
+}
+
+function building(): Grid {
+  const g = grid(1);
+  for (let y = 1; y < 15; y++) {
+    for (let x = 1; x < 15; x++) {
+      g[y][x] = y < 3 ? 3 : 2;
+    }
+  }
+  for (let y = 5; y < 14; y += 3) {
+    for (let x = 3; x < 13; x += 3) {
+      put(g, x, y, 1); put(g, x + 1, y, 1);
+    }
+  }
+  return g;
+}
+
+function sand(): Grid {
+  const g = grid(1);
+  for (const [x, y] of [[2, 2], [9, 1], [13, 5], [5, 7], [11, 10], [2, 12], [7, 14]]) {
+    put(g, x, y, 3); put(g, x + 1, y + 1, 2);
+  }
+  return g;
+}
+
+function snow(): Grid {
+  const g = grid(3);
+  for (const [x, y] of [[3, 3], [10, 2], [6, 8], [13, 11], [2, 13]]) {
+    put(g, x, y, 1); put(g, x + 1, y, 1);
+  }
+  return g;
+}
+
+function farm(): Grid {
+  const g = grid(0);
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (y % 4 === 1) { g[y][x] = 2; }
+      else if (y % 4 === 2) { g[y][x] = 1; }
+    }
+  }
+  return g;
+}
+
+function wetland(): Grid {
+  const g = grid(0);
+  for (const [x, y] of [[1, 3], [9, 2], [5, 8], [12, 10], [2, 13]]) {
+    for (let dx = 0; dx < 4; dx++) {
+      put(g, x + dx, y, 1);
+    }
+  }
+  for (const [x, y] of [[4, 5], [13, 6], [8, 12], [1, 9]]) {
+    put(g, x, y, 3); put(g, x, y - 1, 3); put(g, x, y - 2, 3);
+  }
+  return g;
+}
+
+function railH(): Grid {
+  const g = grid(2);
+  for (let x = 0; x < 16; x++) {
+    for (let y = 2; y < 14; y++) {
+      if (x % 4 < 2) { g[y][x] = 1; }
+    }
+    g[5][x] = g[10][x] = 3;
+  }
+  return g;
+}
+
+function railX(): Grid {
+  const g = railH();
+  const v = transpose(railH());
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (v[y][x] === 3) { g[y][x] = 3; }
+    }
+  }
+  return g;
+}
+
+function crossing(): Grid {
+  const g = roadH();
+  for (let y = 0; y < 16; y++) {
+    g[y][5] = g[y][10] = 3;
+  }
+  return g;
+}
+
+function hwyH(): Grid {
+  const g = grid(1);
+  for (let x = 0; x < 16; x++) {
+    g[0][x] = g[15][x] = 3;
+    g[1][x] = g[14][x] = 2;
+    g[7][x] = g[8][x] = 2;
+    if (x % 4 < 2) { g[3][x] = g[12][x] = 3; }
+  }
+  return g;
+}
+
+function hwyX(): Grid {
+  const g = grid(1);
+  for (const [x, y] of [[0, 0], [14, 0], [0, 14], [14, 14]]) {
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dy = 0; dy < 2; dy++) {
+        g[y + dy][x + dx] = 3;
+      }
+    }
+  }
+  for (let i = 2; i < 14; i++) {
+    g[7][i] = g[8][i] = g[i][7] = g[i][8] = 2;
+  }
+  return g;
+}
+
+// 並び順は src/terrain.h の T_* と一致させる
 const BG = [grass(), forest(), mountain(), rock(), water(),
-  bridgeH(), transpose(bridgeH()), roadH(), transpose(roadH()), roadX()];
+  bridgeH(), transpose(bridgeH()), roadH(), transpose(roadH()), roadX(),
+  urban(), building(), sand(), snow(), farm(), wetland(),
+  railH(), transpose(railH()), railX(), crossing(),
+  hwyH(), transpose(hwyH()), hwyX()];
 
 // ---- プレイヤー (上半身 pal0: 1=髪 2=肌 3=赤キャップ / 下半身 pal1: 1=白 2=ジーンズ 3=肌) ----
 const LEGS_STAND = ["0000022222200000", "0000022222200000", "0000022002200000", "0000011001100000"];

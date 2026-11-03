@@ -44,7 +44,7 @@ describe("mapserver", () => {
       for (const [x, y] of [[0, 0], [w / 2, w / 2], [w - 1, w - 1]]) {
         const t = src.cell(z, x, y);
         expect(t).toBeGreaterThanOrEqual(0);
-        expect(t).toBeLessThanOrEqual(m.T_ROAD_X);
+        expect(t).toBeLessThanOrEqual(m.T_HWY_X);
       }
     }
   });

@@ -6,7 +6,7 @@
  * 地形 ID を返す。地形 ID は src/terrain.h と一致させる。
  *
  * 要求 (9 バイト):
- *   [0]    z (1..20)
+ *   [0]    z (1..18)
  *   [1:4]  タイル x (24bit ビッグエンディアン)
  *   [4:7]  タイル y (同上)
  *   [7]    xo<<4 | yo   タイル内のマス位置 (1 タイル = 16x16 マス)
@@ -16,12 +16,15 @@
  * マスの世界座標は X = tx*16+xo, Y = ty*16+yo。1 辺は 2**(z+4) マス。
  * X は経度方向なので巻き戻し、Y が範囲外なら T_ROCK (極の外側) を返す。
  */
+import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { OsmSource } from "./osmsource";
 
-export const T_GRASS = 0, T_FOREST = 1, T_MOUNTAIN = 2, T_ROCK = 3, T_WATER = 4,
-  T_BRIDGE_H = 5, T_BRIDGE_V = 6, T_ROAD_H = 7, T_ROAD_V = 8, T_ROAD_X = 9;
+import { T_ROCK, T_ROAD_V, T_BRIDGE_V, T_ROAD_H, T_BRIDGE_H, T_ROAD_X, T_WATER, T_MOUNTAIN, T_FOREST, T_GRASS } from "./terrain";
 
-export const Z_MIN = 1, Z_MAX = 20;
+export * from "./terrain";
+
+export const Z_MIN = 1, Z_MAX = 18;     // OSM 由来のマスは z18 (約 8m) まで
 export const REQ_LEN = 9;
 export const SEED = 88;     // 起動地点 (東京 z=10) が陸になるように選んだ
 
@@ -213,12 +216,16 @@ function main() {
       host: { type: "string", default: "127.0.0.1" },
       port: { type: "string", default: "5555" },
       seed: { type: "string", default: String(SEED) },
+      db: { type: "string", default: "data/world.sqlite" },
       verbose: { type: "boolean", short: "v", default: false },
     },
   });
   const seed = Number(values.seed);
-  const srv = serve(new SyntheticSource(seed), values.host, Number(values.port), values.verbose);
-  console.log(`mapserver listening on ${srv.hostname}:${srv.port} (seed ${seed})`);
+  // world.sqlite があれば実際の地図、なければノイズの仮の世界
+  const real = existsSync(values.db);
+  const source = real ? new OsmSource(values.db) : new SyntheticSource(seed);
+  const srv = serve(source, values.host, Number(values.port), values.verbose);
+  console.log(`mapserver listening on ${srv.hostname}:${srv.port} (${real ? values.db : `synthetic, seed ${seed}`})`);
 }
 
 if (import.meta.main) {

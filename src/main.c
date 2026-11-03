@@ -39,8 +39,14 @@ enum { PROBE_NONE, PROBE_REQ, PROBE_OK, PROBE_BLOCKED };
 
 extern void wait_vblank(void);
 
-/* BG パレット: 0=草/森 1=山 2=岩/道路 3=水/橋 (T_* の並び順) */
-static const unsigned char tile_pal[] = { 0, 0, 1, 2, 3, 3, 3, 2, 2, 2 };
+/* BG パレット: 0=緑 (草/森/農地/湿地) 1=茶/白 (山/砂/雪) 2=灰 (岩/道路/市街/線路) 3=青 (水/橋)
+ * (T_* の並び順) */
+static const unsigned char tile_pal[] = {
+    0, 0, 1, 2, 3, 3, 3, 2, 2, 2,
+    2, 2, 1, 1, 0, 0,
+    2, 2, 2, 2,
+    2, 2, 2
+};
 
 static const unsigned char palette[32] = {
     0x1A, 0x0A, 0x2A, 0x17,
@@ -56,7 +62,7 @@ static const unsigned char palette[32] = {
 typedef unsigned long u32;
 
 #define Z_MIN 1                /* 1 辺は 2^(z+4) マス。z=1 でも 32 マスあり、輪より狭くならない */
-#define Z_MAX 20               /* 2^24 マスで 24bit にちょうど収まる */
+#define Z_MAX 18               /* OSM 由来のマスは z18 (約 8m) まで。座標は 24bit のまま */
 #define START_Z 10
 #define START_X 14549UL        /* 東京 (経度 139.69 / 緯度 35.69) の z=10 でのマス座標 */
 #define START_Y 6451UL
@@ -201,7 +207,10 @@ static void probe_run(void)
     PPU_ADDR = (unsigned char)probe_addr;
     t = PPU_DATA;                   /* 1 回目は読み捨て */
     t = PPU_DATA >> 2;
-    probe = (t == T_WATER || t == T_ROCK) ? PROBE_BLOCKED : PROBE_OK;
+    /* 線路・高速道路は z14 以上で通行不可 (z13 以下は地図が分断されるので通す) */
+    probe = (t == T_WATER || t == T_ROCK || t == T_BUILDING || t == T_WETLAND
+             || (z >= 14 && ((t >= T_RAIL_H && t <= T_RAIL_X) || t >= T_HWY_H)))
+            ? PROBE_BLOCKED : PROBE_OK;
 }
 
 /* vblank 内で呼ぶ */
