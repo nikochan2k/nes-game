@@ -74,8 +74,8 @@ Mesen は `/Applications` または `~/Applications` から探す。
 陸地ポリゴン (`land-polygons-split-3857`)、国土地理院の標高タイル (`dem_png` z14)。
 
 ```
-bun server/build_world.ts check
-bun server/build_world.ts dem   --bbox 139.6,35.6,139.9,35.8
+bun server/build_world.ts check          # 入力が揃っているか
+bun server/download.ts all kanto --bbox 139.6,35.6,139.9,35.8
 bun server/build_world.ts build --bbox 139.6,35.6,139.9,35.8 --pbf data/osm/kanto-latest.osm.pbf
 ```
 

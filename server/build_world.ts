@@ -4,7 +4,7 @@
  * Bun だけで動く (osmium も GDAL も不要)。
  *
  *   bun server/build_world.ts check
- *   bun server/build_world.ts dem   --bbox w,s,e,n     標高タイルをダウンロード (国土地理院 dem_png z14)
+ *   (入力のダウンロードは bun server/download.ts)
  *   bun server/build_world.ts build --bbox w,s,e,n     world.sqlite を作る
  *
  * 入力:
@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { Dem, downloadTile } from "./dem";
+import { Dem } from "./dem";
 import { loadFeatures } from "./osmfeatures";
 import { readPolygons } from "./shapefile";
 import { BLOCK_M, MERC, Painter, blockRange } from "./worldbuild";
@@ -28,7 +28,6 @@ const DEFAULTS = {
   land: "data/osm/land-polygons-split-3857/land_polygons.shp",
   dem: "data/dem",
   out: "data/world.sqlite",
-  demBase: "https://cyberjapandata.gsi.go.jp/xyz/dem_png",
 };
 
 function parseBbox(s: string): [number, number, number, number] {
@@ -47,19 +46,6 @@ function check(o: typeof DEFAULTS): boolean {
     ok &&= found;
   }
   return ok;
-}
-
-async function downloadDem(dir: string, base: string, bbox: [number, number, number, number], delay: number) {
-  const { bx0, by0, bx1, by1 } = blockRange(bbox);
-  const tiles: [number, number][] = [];
-  for (let y = by0 - 1; y <= by1 + 1; y++) for (let x = bx0 - 1; x <= bx1 + 1; x++) tiles.push([x, y]);
-  console.log(`${tiles.length} タイル (出典: 国土地理院。出典表示が必要)`);
-  let n = 0, got = 0, none = 0;
-  for (const [x, y] of tiles) {
-    const r = await downloadTile(dir, x, y, base);
-    if (r === "ok") { got++; await Bun.sleep(delay); } else if (r === "none") { none++; await Bun.sleep(delay); }
-    if (++n % 100 === 0 || n === tiles.length) console.log(`${n}/${tiles.length} (取得 ${got}, なし ${none})`);
-  }
 }
 
 async function build(o: typeof DEFAULTS & { bbox: [number, number, number, number]; tile: number; margin: number; noDem: boolean }) {
@@ -119,7 +105,6 @@ async function main() {
       out: { type: "string", default: DEFAULTS.out },
       tile: { type: "string", default: "16" },
       margin: { type: "string", default: "0.05" },
-      delay: { type: "string", default: "50" },
       "no-dem": { type: "boolean", default: false },
     },
   });
@@ -127,13 +112,11 @@ async function main() {
   const cmd = positionals[0];
   if (cmd === "check") {
     process.exit(check(o) ? 0 : 1);
-  } else if (cmd === "dem") {
-    await downloadDem(o.dem, o.demBase, parseBbox(values.bbox!), Number(values.delay));
   } else if (cmd === "build") {
     await build({ ...o, bbox: parseBbox(values.bbox!), tile: Number(values.tile), margin: Number(values.margin),
       noDem: values["no-dem"]! });
   } else {
-    console.log("usage: bun server/build_world.ts check | dem --bbox w,s,e,n | build --bbox w,s,e,n"
+    console.log("usage: bun server/build_world.ts check | build --bbox w,s,e,n"
       + " [--pbf f] [--land f] [--dem dir] [--out f] [--tile 16] [--margin 0.05] [--no-dem]");
     process.exit(2);
   }
