@@ -9,7 +9,7 @@
  *
  * 入力:
  *   data/osm/<地域>.osm.pbf                           OSM (--pbf)。Geofabrik の地方別ファイルを順に build すると全国になる
- *   data/osm/land-polygons-split-3857/land_polygons.shp   陸地ポリゴン (--land)
+ *   (陸地は pbf の海岸線 natural=coastline から作る。--land で land-polygons-split-3857 の .shp を使うこともできる)
  *   data/dem/14/{x}/{y}.png                           標高 (--dem)。--no-dem なら傾斜なし
  *
  * メモリは「地物のジオメトリ + 16x16 ブロックの作業台 (約 70MB)」。広い範囲は bbox を分けて複数回実行する。
@@ -18,14 +18,15 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { Dem } from "./dem";
-import { loadFeatures } from "./osmfeatures";
+import { landFromCoast } from "./coast";
+import { loadFeatures, xToLon, yToLat } from "./osmfeatures";
 import { readPolygons } from "./shapefile";
-import { BLOCK_M, MERC, Painter, blockRange } from "./worldbuild";
-import { createDb, writeBlock } from "./worlddb";
+import { BLOCK_M, MERC, Painter, blockRange, type Land } from "./worldbuild";
+import { BLOCK_SIZE, createDb, writeBlock } from "./worlddb";
 
 const DEFAULTS = {
   pbf: "data/osm/japan-latest.osm.pbf",
-  land: "data/osm/land-polygons-split-3857/land_polygons.shp",
+  land: "",
   dem: "data/dem",
   out: "data/world.sqlite",
 };
@@ -40,7 +41,7 @@ function parseBbox(s: string): [number, number, number, number] {
 
 function check(o: typeof DEFAULTS): boolean {
   let ok = true;
-  for (const [p, what] of [[o.pbf, "OSM pbf"], [o.land, "陸地ポリゴン"], [o.dem, "標高 (--no-dem なら不要)"]]) {
+  for (const [p, what] of [[o.pbf, "OSM pbf"], [o.dem, "標高 (--no-dem なら不要)"]]) {
     const found = existsSync(p);
     console.log(`${found ? "ok     " : "MISSING"} ${p}  (${what})`);
     ok &&= found;
@@ -54,16 +55,25 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   const t0 = Date.now();
   const lap = (msg: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0)}s] ${msg}`);
 
-  // 陸地ポリゴン (3857 の m で範囲を絞る)
-  const mx0 = -MERC + (bx0 - 1) * BLOCK_M, mx1 = -MERC + (bx1 + 2) * BLOCK_M;
-  const my1 = MERC - (by0 - 1) * BLOCK_M, my0 = MERC - (by1 + 2) * BLOCK_M;
-  const land = await readPolygons(o.land, [mx0, my0, mx1, my1]);
-  lap(`陸地ポリゴン ${land.length} 件`);
-
-  const features = await loadFeatures(o.pbf, { bbox: o.bbox, margin: o.margin });
+  const win = { x0: bx0 * BLOCK_SIZE, y0: by0 * BLOCK_SIZE, x1: (bx1 + 1) * BLOCK_SIZE, y1: (by1 + 1) * BLOCK_SIZE };
+  // 地物はブロックの範囲全体 (+margin) を読む
+  const bbox: [number, number, number, number] = [xToLon(win.x0), yToLat(win.y1), xToLon(win.x1), yToLat(win.y0)];
+  const { features, coast } = await loadFeatures(o.pbf, { bbox, margin: o.margin });
   const areas = features.filter((f) => f.area).sort((a, b) => a.rank - b.rank);
   const lines = features.filter((f) => !f.area).sort((a, b) => a.rank - b.rank);
-  lap(`地物 面 ${areas.length} 線 ${lines.length}`);
+  lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本`);
+
+  let land: Land[];
+  if (o.land) {
+    const mx0 = -MERC + (bx0 - 1) * BLOCK_M, mx1 = -MERC + (bx1 + 2) * BLOCK_M;
+    const my1 = MERC - (by0 - 1) * BLOCK_M, my0 = MERC - (by1 + 2) * BLOCK_M;
+    land = await readPolygons(o.land, [mx0, my0, mx1, my1]);
+    lap(`陸地ポリゴン ${land.length} 件 (${o.land})`);
+  } else {
+    const c = landFromCoast(coast, win, features.length > 0);
+    land = [{ parts: c.parts, minx: win.x0, miny: win.y0, maxx: win.x1, maxy: win.y1 }];
+    lap(`海岸線から陸の輪 ${c.parts.length} 個${c.open ? ` (端が窓の中で途切れた海岸線 ${c.open} 本は無視)` : ""}`);
+  }
 
   mkdirSync("data", { recursive: true });
   const db = createDb(o.out);

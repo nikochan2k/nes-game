@@ -70,8 +70,8 @@ Mesen は `/Applications` または `~/Applications` から探す。
 `doc/tile-conversion-plan.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
 `server/mapserver.ts` のノイズで作った仮の世界を返す。`--db` でファイルを指定できる。
 
-`data/world.sqlite` は Bun だけで作れる (osmium / GDAL 不要)。入力は OSM の pbf (Geofabrik)、
-陸地ポリゴン (`land-polygons-split-3857`)、国土地理院の標高タイル (`dem_png` z14)。
+`data/world.sqlite` は Bun だけで作れる (osmium / GDAL 不要)。入力は OSM の pbf (Geofabrik) と
+国土地理院の標高タイル (`dem_png` z14) だけ。陸と海は pbf の海岸線 (`natural=coastline`) から作る。
 
 ```
 bun server/build_world.ts check          # 入力が揃っているか

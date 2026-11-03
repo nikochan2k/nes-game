@@ -6,6 +6,7 @@ import { Dem, decodePng, rgbToElevation } from "./dem";
 import { IdMap, areaClassOf, assembleRings, latToY, lineAttrsOf, loadFeatures, lonToX } from "./osmfeatures";
 import { scanPbf } from "./osmpbf";
 import { OsmSource } from "./osmsource";
+import { assembleChains, landFromCoast } from "./coast";
 import { fillRings, lineCells } from "./rasterize";
 import { readPolygons } from "./shapefile";
 import * as T from "./terrain";
@@ -78,6 +79,69 @@ describe("ラスタライズ", () => {
   });
 });
 
+describe("海岸線から陸", () => {
+  const win = { x0: 0, y0: 0, x1: 100, y1: 100 };
+  const area = (rings: Float64Array[]) => {
+    let n = 0;
+    fillRings(rings, win, (_y, xa, xb) => { n += xb - xa; });
+    return n;
+  };
+  const chain = (...p: number[]) => Float64Array.from(p);
+
+  test("鎖をつなぐ (向きは変えない)", () => {
+    const c = assembleChains([[3, 4, 5], [1, 2, 3], [9, 8]]);
+    expect(c.map((x) => x.join()).sort()).toEqual(["1,2,3,4,5", "9,8"]);
+    expect(assembleChains([[1, 2], [2, 3], [3, 1]])[0].length).toBe(4);     // 輪
+  });
+
+  test("東へ進む海岸線: 北 (y が小さい側) が陸", () => {
+    const c = landFromCoast([chain(-20, 50, 120, 50)], win, false);
+    expect(area(c.parts)).toBe(100 * 50);
+    let north = false, south = false;
+    fillRings(c.parts, win, (y) => { if (y === 10) north = true; if (y === 90) south = true; });
+    expect([north, south]).toEqual([true, false]);
+  });
+
+  test("南へ進む海岸線: 東が陸", () => {
+    const c = landFromCoast([chain(50, -10, 50, 110)], win, false);
+    let east = false, west = false;
+    fillRings(c.parts, win, (_y, xa, xb) => { if (xa <= 80 && xb > 80) east = true; if (xa <= 20 && xb > 20) west = true; });
+    expect(area(c.parts)).toBe(50 * 100);
+    expect([east, west]).toEqual([true, false]);
+  });
+
+  test("斜めの海岸線が角をまたぐ: 左上の三角形が陸", () => {
+    const c = landFromCoast([chain(-20, 60, 60, -20)], win, false);        // x+y=40 を北東へ
+    expect(c.parts.length).toBe(1);
+    expect(area(c.parts)).toBeGreaterThan(700);
+    expect(area(c.parts)).toBeLessThan(850);
+  });
+
+  test("2 本の海岸線で挟まれた陸 (半島の付け根)", () => {
+    const c = landFromCoast([chain(-10, 30, 110, 30), chain(110, 70, -10, 70)], win, false);
+    expect(area(c.parts)).toBe(100 * 30 + 100 * 30);
+  });
+
+  test("島 (陸を囲む輪) と、陸の中の水の輪", () => {
+    const island = chain(60, 40, 40, 40, 40, 60, 60, 60, 60, 40);
+    expect(area(landFromCoast([island], win, false).parts)).toBe(400);
+    const lake = chain(40, 40, 60, 40, 60, 60, 40, 60, 40, 40);                 // 逆回り = 水が内側
+    expect(landFromCoast([lake], win, false).parts.length).toBe(2);
+    expect(area(landFromCoast([lake], win, false).parts)).toBe(100 * 100 - 400);
+  });
+
+  test("海岸線がなければ、陸の地物があるときだけ陸", () => {
+    expect(area(landFromCoast([], win, true).parts)).toBe(100 * 100);
+    expect(landFromCoast([], win, false).parts.length).toBe(0);
+    expect(landFromCoast([chain(500, 500, 600, 500)], win, false).parts.length).toBe(0);
+  });
+
+  test("端が窓の中で途切れた海岸線は無視して数える", () => {
+    const c = landFromCoast([chain(20, 50, 120, 50)], win, false);
+    expect(c.open).toBe(1);
+  });
+});
+
 describe("PBF と地物", () => {
   test("タグの意味", () => {
     expect(areaClassOf({ landuse: "forest", building: "no" })).toBe(classId("landuse", "forest"));
@@ -88,6 +152,9 @@ describe("PBF と地物", () => {
     expect(lineAttrsOf({ highway: "primary_link" })).toMatchObject({ road: classId("highway", "primary") });
     expect(lineAttrsOf({ highway: "residential", bridge: "yes" })).toMatchObject({ bridge: true });
     expect(lineAttrsOf({ highway: "residential", tunnel: "yes" })).toBeNull();
+    expect(lineAttrsOf({ highway: "footway", footway: "sidewalk" })).toBeNull();
+    expect(lineAttrsOf({ highway: "footway", footway: "crossing" })).toBeNull();
+    expect(lineAttrsOf({ highway: "footway" })).toMatchObject({ road: classId("highway", "footway") });
     expect(lineAttrsOf({ waterway: "stream" })).toBeNull();
     expect(lineAttrsOf({ waterway: "river" })).toMatchObject({ river: true });
     expect(lineAttrsOf({ railway: "abandoned" })).toBeNull();
@@ -245,7 +312,7 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     await writeShp(shp, [[[[X0 - 500, Y0 - 500], [X0 + 128, Y0 - 500], [X0 + 128, Y0 + 700], [X0 - 500, Y0 + 700]]]]);
 
     const [w, n] = ll(10, 10), [e, s] = ll(250, 250);
-    const feats = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
+    const { features: feats } = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
     const areas = feats.filter((f) => f.area).sort((a, b) => a.rank - b.rank);
     const lines = feats.filter((f) => !f.area).sort((a, b) => a.rank - b.rank);
     expect(feats.some((f) => f.minx > X0 + 1000)).toBe(false);

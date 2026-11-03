@@ -4,9 +4,9 @@
  *
  *   bun server/download.ts osm kanto            Geofabrik の地方別 pbf → data/osm/kanto-latest.osm.pbf
  *   bun server/download.ts osm japan            日本全体 (約 2GB) → data/osm/japan-latest.osm.pbf
- *   bun server/download.ts land                 陸地ポリゴン (zip 約 520MB) → data/osm/land-polygons-split-3857/
+ *   bun server/download.ts land                 (任意) 陸地ポリゴン (zip 約 520MB)。通常は pbf の海岸線を使うので不要
  *   bun server/download.ts dem --bbox w,s,e,n   国土地理院の標高タイル (z14) → data/dem/14/
- *   bun server/download.ts all kanto --bbox ... 上の 3 つをまとめて
+ *   bun server/download.ts all kanto --bbox ... osm と dem をまとめて
  *
  * 既にあるファイルは取り直さない (--force で取り直す)。zip の展開に unzip コマンドを使う。
  * 出典: © OpenStreetMap contributors (ODbL) / 陸地ポリゴンは osmdata.openstreetmap.de /
@@ -121,7 +121,6 @@ async function main() {
   } else if (cmd === "all") {
     const bbox = parseBbox(values.bbox);
     await osm();
-    await downloadLand(values.force);
     await downloadDem(bbox, "data/dem", Number(values.delay));
     console.log(`\nbun server/build_world.ts build --bbox ${bbox.join(",")} --pbf data/osm/${region}-latest.osm.pbf`);
   } else {

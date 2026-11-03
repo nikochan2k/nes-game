@@ -7,6 +7,7 @@
  *   3. 必要なノードの座標を集める
  * 範囲 (bbox) の外に頂点しかなくて範囲を覆う大きな面は取りこぼす。margin で外側を広げて対処する。
  */
+import { assembleChains } from "./coast";
 import { scanPbf, type Member } from "./osmpbf";
 import { CLASSES, KIND_AREA, KIND_RAIL, KIND_ROAD, classId } from "./worlddb";
 
@@ -14,6 +15,12 @@ export const WORLD_CELLS = 1 << 22;               // z18 の 1 辺のマス数
 
 export function lonToX(lon: number): number {
   return ((lon + 180) / 360) * WORLD_CELLS;
+}
+export function xToLon(x: number): number {
+  return (x / WORLD_CELLS) * 360 - 180;
+}
+export function yToLat(y: number): number {
+  return (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / WORLD_CELLS))) * 180) / Math.PI;
 }
 export function latToY(lat: number): number {
   const s = Math.sin((lat * Math.PI) / 180);
@@ -63,7 +70,9 @@ export function lineAttrsOf(tags: Record<string, string>): LineAttrs | null {
   if (tags.tunnel === "yes") return null;
   const hv = tags.highway;
   const hwy = hv === "motorway" || hv === "motorway_link" || (hv !== undefined && tags.motorroad === "yes");
-  const road = hv && !hwy ? roadId(ROAD_ALIAS[hv] ?? hv) : 0;
+  // 歩道と横断歩道は車道と平行・直交して描かれていて、7.8m のマスでは車道の隣が全部交差点になるので使わない
+  const sidewalk = tags.footway === "sidewalk" || tags.footway === "crossing" || tags.cycleway === "crossing";
+  const road = hv && !hwy && !sidewalk ? roadId(ROAD_ALIAS[hv] ?? hv) : 0;
   const rv = tags.railway;
   const rail = rv ? railId(RAIL_ALIAS[rv] ?? rv) : 0;
   const river = tags.waterway === "river" || tags.waterway === "canal";
@@ -166,9 +175,14 @@ export interface LoadOptions {
   margin?: number;                            // 外側に広げる度数 (既定 0.05)
 }
 
-interface KeptWay { refs: number[]; area: number; line: LineAttrs | null; touches: boolean }
+interface KeptWay { refs: number[]; area: number; line: LineAttrs | null; touches: boolean; coast: boolean }
 
-export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Feature[]> {
+export interface Loaded {
+  features: Feature[];
+  coast: Float64Array[];                      // 海岸線の鎖 (陸が進行方向の左)。マス座標
+}
+
+export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loaded> {
   const m = opt.margin ?? 0.05;
   const [w, s, e, n] = [opt.bbox[0] - m, opt.bbox[1] - m, opt.bbox[2] + m, opt.bbox[3] + m];
 
@@ -200,11 +214,12 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Featu
       const closed = refs.length >= 4 && refs[0] === refs[refs.length - 1];
       const area = closed ? areaClassOf(tags) : 0;
       const line = lineAttrsOf(tags);
-      if (!isMember && !area && !line) return;
+      const coast = tags.natural === "coastline";
+      if (!isMember && !area && !line && !coast) return;
       let touches = false;
       for (let i = 0; i < refs.length && !touches; i++) touches = inBox.has(refs[i]);
       if (!isMember && !touches) return;
-      kept.set(id, { refs, area, line, touches });
+      kept.set(id, { refs, area, line, touches, coast });
       for (const r of refs) need.set(r);
     },
   });
@@ -241,8 +256,10 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Featu
       ...partial, parts, minx, miny, maxx, maxy });
   };
 
+  const coastWays: number[][] = [];
   for (const k of kept.values()) {
     if (!k.touches) continue;
+    if (k.coast) coastWays.push(k.refs);
     if (k.area) {
       const xy = toXY(k.refs);
       if (xy.length >= 8) push({ area: k.area, rank: rankOf(k.area) }, [xy]);
@@ -260,5 +277,6 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Featu
     const parts = assembleRings(ways.map((x) => x.refs)).map(toXY).filter((p) => p.length >= 8);
     if (parts.length > 0) push({ area: r.area, rank: rankOf(r.area) }, parts);
   }
-  return out;
+  const coast = assembleChains(coastWays).map(toXY).filter((c) => c.length >= 4);
+  return { features: out, coast };
 }
