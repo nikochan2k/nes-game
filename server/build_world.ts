@@ -94,6 +94,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
           }
         }
       })();
+      gc();                   // 輪や座標の一時配列が溜まって RSS が膨らむので、タイルごとに回収する
       lap(`タイル (${tx},${ty}) まで。計 ${blocks} ブロック (rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB)`);
     }
   }
