@@ -136,9 +136,13 @@ describe("海岸線から陸", () => {
     expect(landFromCoast([chain(500, 500, 600, 500)], win, false).parts.length).toBe(0);
   });
 
-  test("端が窓の中で途切れた海岸線は無視して数える", () => {
-    const c = landFromCoast([chain(20, 50, 120, 50)], win, false);
-    expect(c.open).toBe(1);
+  test("端が窓の中で途切れた海岸線 (抽出範囲の境) は、向きのまま枠まで延ばして閉じる", () => {
+    const c = landFromCoast([chain(-20, 50, 60, 50)], win, false);       // 東へ進んで x=60 で終わる
+    expect(c.extended).toBe(1);
+    expect(area(c.parts)).toBe(100 * 50);
+    const d = landFromCoast([chain(40, 50, 40, 20, 120, 20)], win, false);   // 始点が窓の中: 北へ進んでから東へ
+    expect(d.extended).toBe(1);
+    expect(d.parts.length).toBe(1);
   });
 });
 

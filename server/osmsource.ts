@@ -29,8 +29,9 @@ const CAT_TERRAIN: Record<string, number> = {
 // ---- ズームごとのしきい値 (8.3 の表。rank は worlddb.ts の CLASSES) ----
 const NONE = 1000;
 /** [z の下限, 出す一般道路の rank の下限]。上から順に見て最初に当てはまるもの。 */
-// 都心 (東京駅・渋谷・豊洲) で道路マスが画面の 20〜50% に収まるように、プラン 8.3 の初期値から 3 段上げた
-export const ROAD_MIN: [number, number][] = [[18, 1], [17, 45], [16, 60], [15, 70], [13, 80], [6, 90]];
+// 都心 (東京駅・渋谷・豊洲) で道路マスが画面の 20〜50% に収まるように、プラン 8.3 の初期値から 3 段上げた。
+// z10 以下は一般道路を出さない (関東では trunk 以上が陸のブロックの約 6 割にあり、何を基準にしても全面が道路になる)
+export const ROAD_MIN: [number, number][] = [[18, 1], [17, 45], [16, 60], [15, 70], [13, 80], [11, 90]];
 /** 線路。 */
 export const RAIL_MIN: [number, number][] = [[15, 1], [12, 70], [6, 90]];
 
@@ -57,6 +58,13 @@ interface Rep {
   mountPct: number; rockPct: number;
 }
 
+const PRELOAD_MAX = 2_000_000;
+
+const repOf = (row: any): Rep => ({
+  area: row.area, areaPct: row.area_pct, road: row.road, rail: row.rail, motorway: row.motorway,
+  mountPct: row.mount_pct, rockPct: row.rock_pct,
+});
+
 export class OsmSource implements Source {
   private db: Database;
   private blockQ;
@@ -64,6 +72,7 @@ export class OsmSource implements Source {
   private rank = new Uint8Array(256);       // osm_class.id → rank
   private kind = new Uint8Array(256);       // 面の id → K_*
   private terr = new Uint8Array(256);       // 面の id → 地形
+  private preloaded = false;
   private missing: Rep;                    // 範囲外 (行がない場所) = 海
   private blocks = new Map<number, Block | null>();
   private reps = new Map<number, Rep>();
@@ -92,6 +101,23 @@ export class OsmSource implements Source {
       throw new Error("osm_class に海 (sea=sea) がない");
     }
     this.missing = { area: water, areaPct: 100, road: 0, rail: 0, motorway: 0, mountPct: 0, rockPct: 0 };
+    this.preloadReps();
+  }
+
+  /**
+   * 代表値 (data を除く小さい列) は日本全体でも約 10 万行・数 MB なので、起動時に全部メモリへ載せる。
+   * z6 以下は 1 マスにつき最大 256 行を読むので、毎回 SQLite に問い合わせると 0.35 秒に迫るため。
+   */
+  private preloadReps() {
+    const n = (this.db.query("SELECT count(*) AS n FROM block").get() as { n: number }).n;
+    if (n > PRELOAD_MAX) {
+      return;
+    }
+    for (const row of this.db.query(
+      "SELECT bx, by, area, area_pct, road, rail, motorway, mount_pct, rock_pct FROM block").iterate() as Iterable<any>) {
+      this.reps.set(row.bx * 16384 + row.by, repOf(row));
+    }
+    this.preloaded = true;
   }
 
   close() {
@@ -122,12 +148,12 @@ export class OsmSource implements Source {
     }
     const key = bx * 16384 + by;
     let r = this.reps.get(key);
+    if (r === undefined && this.preloaded) {
+      return this.missing;
+    }
     if (r === undefined) {
       const row = this.repQ.get(bx, by) as any;
-      r = row ? {
-        area: row.area, areaPct: row.area_pct, road: row.road, rail: row.rail, motorway: row.motorway,
-        mountPct: row.mount_pct, rockPct: row.rock_pct,
-      } : this.missing;
+      r = row ? repOf(row) : this.missing;
       if (this.reps.size > 200000) {
         this.reps.clear();
       }
@@ -225,21 +251,26 @@ export class OsmSource implements Source {
       | (road && bridge ? F_BRIDGE : 0) | (cross ? F_CROSS | F_ROAD | F_RAIL : 0);
   }
 
-  /** z1〜10。1 マス = 2^(10-z) ブロック四方。代表値から作る (橋と踏切は出さない)。8.2 */
+  /**
+   * z1〜10。1 マス = 2^(10-z) ブロック四方。代表値から作る (橋と踏切は出さない)。8.2
+   * 道路・線路・高速道路は、1 つでもあれば出すと z8 以下で全面が道路になる (関東で実測) ので、
+   * 該当するブロックが一辺の半分以上 (道路がマスを半分ほど横切る) あるときだけ出す。
+   */
   private featReps(z: number, x: number, y: number): number {
     const nb = 1 << (10 - z), bx0 = x * nb, by0 = y * nb;
     const count = Math.min(nb, 16), step = nb / count;   // z5 以下は 16x16 だけ読む
+    const need = Math.max(1, count >> 1);
     const rmin = roadMin(z), tmin = railMin(z), hwy = hwyShown(z);
     const { rank, weights } = this;
     weights.fill(0);
-    let road = false, rail = false, hw = false, rockSum = 0, mountSum = 0;
+    let road = 0, rail = 0, hw = 0, rockSum = 0, mountSum = 0;
     for (let j = 0; j < count; j++) {
       for (let i = 0; i < count; i++) {
         const r = this.rep(bx0 + i * step, by0 + j * step);
         weights[r.area] += r.areaPct;
-        if (r.road !== 0 && rank[r.road] >= rmin) road = true;
-        if (r.rail !== 0 && rank[r.rail] >= tmin) rail = true;
-        if (hwy && r.motorway) hw = true;
+        if (r.road !== 0 && rank[r.road] >= rmin) road++;
+        if (r.rail !== 0 && rank[r.rail] >= tmin) rail++;
+        if (hwy && r.motorway) hw++;
         rockSum += r.rockPct;
         mountSum += r.mountPct;
       }
@@ -247,7 +278,7 @@ export class OsmSource implements Source {
     const n = count * count, area = this.majority(weights);
     const rock = rockSum >= ROCK_PCT * n, mount = mountSum >= MOUNT_PCT * n;
     return (this.base(area, rock, mount) << F_BASE_SHIFT)
-      | (road ? F_ROAD : 0) | (hw ? F_HWY : 0) | (rail ? F_RAIL : 0);
+      | (road >= need ? F_ROAD : 0) | (hw >= need ? F_HWY : 0) | (rail >= need ? F_RAIL : 0);
   }
 
   // ---- 向き (7.1) ----

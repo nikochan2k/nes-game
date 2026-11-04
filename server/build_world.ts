@@ -54,12 +54,14 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   console.log(`ブロック x ${bx0}..${bx1}, y ${by0}..${by1} (${(bx1 - bx0 + 1) * (by1 - by0 + 1)} 個)`);
   const t0 = Date.now();
   const lap = (msg: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0)}s] ${msg}`);
+  const gc = () => (globalThis as { Bun?: { gc(force: boolean): void } }).Bun?.gc(true);
 
   const win = { x0: bx0 * BLOCK_SIZE, y0: by0 * BLOCK_SIZE, x1: (bx1 + 1) * BLOCK_SIZE, y1: (by1 + 1) * BLOCK_SIZE };
   // 地物はブロックの範囲全体 (+margin) を読む
   const bbox: [number, number, number, number] = [xToLon(win.x0), yToLat(win.y1), xToLon(win.x1), yToLat(win.y0)];
   const { store, coast } = await loadFeatures(o.pbf, { bbox, margin: o.margin, log: lap });
   const areas = store.areas(), lines = store.lines();
+  gc();
   lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本`);
 
   let land: Land[];
@@ -71,7 +73,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   } else {
     const c = landFromCoast(coast, win, store.count > 0);
     land = [{ parts: c.parts, minx: win.x0, miny: win.y0, maxx: win.x1, maxy: win.y1 }];
-    lap(`海岸線から陸の輪 ${c.parts.length} 個${c.open ? ` (端が窓の中で途切れた海岸線 ${c.open} 本は無視)` : ""}`);
+    lap(`海岸線から陸の輪 ${c.parts.length} 個${c.extended ? ` (抽出範囲の境で途切れた海岸線の端 ${c.extended} 個を枠まで延長)` : ""}`);
   }
 
   mkdirSync("data", { recursive: true });
@@ -92,7 +94,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
           }
         }
       })();
-      lap(`タイル (${tx},${ty}) まで。計 ${blocks} ブロック`);
+      lap(`タイル (${tx},${ty}) まで。計 ${blocks} ブロック (rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB)`);
     }
   }
   const meta = db.prepare("INSERT OR REPLACE INTO meta VALUES (?, ?)");

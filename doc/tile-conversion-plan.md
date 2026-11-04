@@ -84,12 +84,11 @@ CREATE TABLE osm_class (
   rank  INTEGER NOT NULL       -- 優先度(面は重なったときの勝ち順、道路は幹線ほど大)
 );
 
--- z18 のマス本体
+-- z18 のマス本体 (data は大きいので最後。代表値だけ読むときオーバーフローページをたどらずに済む)
 CREATE TABLE block (
   bx        INTEGER NOT NULL,  -- = z14 タイル x
   by        INTEGER NOT NULL,  -- = z14 タイル y
-  data      BLOB,              -- 256×256 マス × 4 バイト を zlib 圧縮。全マス同じ値なら NULL
-  -- 代表値(z10 以下の動的生成用。data を展開せずに読める)
+  -- 代表値(z10 以下の動的生成用。サーバー起動時に全部メモリへ載せる)
   area      INTEGER NOT NULL,  -- 最も多い面種別(osm_class.id)
   area_pct  INTEGER NOT NULL,  -- その割合 0〜100
   road      INTEGER NOT NULL,  -- ブロック内で最上位の道路(0=なし)
@@ -97,6 +96,7 @@ CREATE TABLE block (
   motorway  INTEGER NOT NULL,  -- 高速道路を含むか(0/1)
   mount_pct INTEGER NOT NULL,  -- 山になるマスの割合 0〜100
   rock_pct  INTEGER NOT NULL,  -- 岩山になるマスの割合 0〜100
+  data      BLOB,              -- 256×256 マス × 4 バイト を zlib 圧縮。全マス同じ値なら NULL
   PRIMARY KEY (bx, by)
 ) WITHOUT ROWID;
 
@@ -223,7 +223,7 @@ z6 前後が 0.35 秒に収まるかは実測で確認する。間に合わな�
 
 ### 8.2 代表値からの集約(z10 以下)
 
-- 道路・線路:ブロックの `road` / `rail` がしきい値以上なら道路・線路にする(OR)。
+- 道路・線路・高速道路:しきい値以上のブロックが、一辺のブロック数の半分以上あるときだけ出す(1 つでもあれば出すと、z8 以下で関東は全面が道路になる)。z10 以下は一般道路を出さない(8.3)。
 - 岩山:`rock_pct` の平均が 30% 以上(案)。
 - 山:`mount_pct` の平均が 40% 以上(案)。日本アルプスなどが山脈として見える。
 - 面:`area` の多数決(`area_pct` で重みづけ)。

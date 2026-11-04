@@ -93,11 +93,13 @@ CREATE TABLE IF NOT EXISTS osm_class (
   id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, key TEXT NOT NULL,
   value TEXT NOT NULL, rank INTEGER NOT NULL
 );
+-- data は大きいので最後に置く (代表値だけを読むとき、オーバーフローページをたどらずに済む)
 CREATE TABLE IF NOT EXISTS block (
-  bx INTEGER NOT NULL, by INTEGER NOT NULL, data BLOB,
+  bx INTEGER NOT NULL, by INTEGER NOT NULL,
   area INTEGER NOT NULL, area_pct INTEGER NOT NULL,
   road INTEGER NOT NULL, rail INTEGER NOT NULL, motorway INTEGER NOT NULL,
   mount_pct INTEGER NOT NULL, rock_pct INTEGER NOT NULL,
+  data BLOB,
   PRIMARY KEY (bx, by)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -146,12 +148,13 @@ export function writeBlock(db: Database, bx: number, by: number, cells: Uint8Arr
     }
   }
   const nullData = uniform && areaOf.size === 1;
-  db.prepare("INSERT OR REPLACE INTO block VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT OR REPLACE INTO block (bx, by, area, area_pct, road, rail, motorway, mount_pct, rock_pct, data)"
+    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
     bx, by,
-    nullData ? null : deflateSync(cells),
     area, Math.round((best * 100) / CELLS),
     topClass(cells, 1), topClass(cells, 2), motorway,
     Math.round((mount * 100) / CELLS), Math.round((rock * 100) / CELLS),
+    nullData ? null : deflateSync(cells),
   );
 }
 

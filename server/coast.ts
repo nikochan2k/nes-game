@@ -93,7 +93,15 @@ function corners(win: Window): { s: number; p: [number, number] }[] {
 
 export interface Coast {
   parts: Float64Array[];     // 陸の輪 (偶奇で塗る)
-  open: number;              // 窓の中で端が宙に浮いている海岸線 (無視した数)
+  extended: number;          // 窓の中で端が途切れていて、枠まで延長した端の数
+}
+
+/** 窓の中の点 (x, y) から向き (dx, dy) へまっすぐ進んで枠に着く点。 */
+function rayToBorder(x: number, y: number, dx: number, dy: number, win: Window): [number, number] {
+  const tx = dx > 0 ? (win.x1 - x) / dx : dx < 0 ? (win.x0 - x) / dx : Infinity;
+  const ty = dy > 0 ? (win.y1 - y) / dy : dy < 0 ? (win.y0 - y) / dy : Infinity;
+  if (tx <= ty) return [dx > 0 ? win.x1 : win.x0, y + dy * tx];
+  return [x + dx * ty, dy > 0 ? win.y1 : win.y0];
 }
 
 /**
@@ -103,7 +111,7 @@ export interface Coast {
 export function landFromCoast(chains: Float64Array[], win: Window, hasLandHint: boolean): Coast {
   const rings: number[][] = [];
   const edgePieces: Piece[] = [];
-  let open = 0, touched = false;
+  let extended = 0, touched = false;
   const holes: number[][] = [];
   for (const xy of chains) {
     if (xy.length < 4) continue;
@@ -121,7 +129,20 @@ export function landFromCoast(chains: Float64Array[], win: Window, hasLandHint: 
         let s = 0;
         for (let i = 0; i + 3 < p.pts.length; i += 2) s += p.pts[i] * p.pts[i + 3] - p.pts[i + 2] * p.pts[i + 1];
         if (s < 0) rings.push(p.pts); else holes.push(p.pts);   // y が下向きなので s<0 が陸を囲む輪
-      } else open++;
+      } else if (!closed) {
+        // 抽出範囲の境で切れた海岸線: 端を、最後の線分の向きに枠までまっすぐ延ばして閉じる
+        const q = p.pts;
+        if (!p.startEdge && q.length >= 4) {
+          q.unshift(...rayToBorder(q[0], q[1], q[0] - q[2], q[1] - q[3], win));
+          p.startEdge = true; extended++;
+        }
+        if (!p.endEdge && q.length >= 4) {
+          const n = q.length;
+          q.push(...rayToBorder(q[n - 2], q[n - 1], q[n - 2] - q[n - 4], q[n - 1] - q[n - 3], win));
+          p.endEdge = true; extended++;
+        }
+        if (p.startEdge && p.endEdge) edgePieces.push(p);
+      }
     }
   }
   if (edgePieces.length > 0) {
@@ -158,5 +179,5 @@ export function landFromCoast(chains: Float64Array[], win: Window, hasLandHint: 
     // 窓全体が陸 (水の輪は穴) / 海岸線がなく陸ばかり
     rings.push([win.x0, win.y0, win.x1, win.y0, win.x1, win.y1, win.x0, win.y1], ...holes);
   }
-  return { parts: rings.map((r) => Float64Array.from(r)), open };
+  return { parts: rings.map((r) => Float64Array.from(r)), extended };
 }

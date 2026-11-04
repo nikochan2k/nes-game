@@ -74,7 +74,7 @@ beforeAll(() => {
   // 北のブロック列: 高速でない主要道路が東西に連続 (z10 の代表値の確認用)
   for (let i = 0; i < 3; i++) {
     const c = blockOf(FOREST);
-    put(c, 3, 3, undefined, TRUNK);
+    put(c, 3, 3, undefined, TRUNK, undefined, B3_HWY);    // 一般道路 (z10 以下では出ない) と高速道路
     writeBlock(db, BX + i, BY - 3, c);
   }
   db.close();
@@ -156,15 +156,22 @@ describe("OsmSource 集約", () => {
     expect(src.cell(11, (X0 + BLOCK_SIZE) / 128, Y0 / 128)).toBe(T.T_MOUNTAIN);
   });
 
-  test("z10: 代表値。主要道路が東西に続けば横の道路", () => {
-    expect(src.cell(10, BX + 1, BY - 3)).toBe(T.T_ROAD_H);
+  test("z10: 代表値。高速道路が東西に続けば横の高速道路。一般道路は出ない", () => {
+    expect(src.cell(10, BX + 1, BY - 3)).toBe(T.T_HWY_H);
     expect(src.cell(10, BX + 1, BY)).toBe(T.T_MOUNTAIN);     // mount_pct 100%
     expect(src.cell(10, BX + 2, BY)).toBe(T.T_URBAN);
   });
 
-  test("z8: 代表値の集約。山が多い範囲だけ山", () => {
-    expect(src.cell(8, (BX + 1) >> 2, BY >> 2)).not.toBe(T.T_WATER);
-    expect(src.cell(8, 0, 0)).toBe(T.T_WATER);               // 範囲外は海
+  test("z8 以下: 高速道路は、マスの半分以上を横切るときだけ出す", () => {
+    // 高速道路のブロックは (BX..BX+2, BY-3) の 3 つ
+    expect(src.cell(9, BX >> 1, (BY - 3) >> 1)).toBe(T.T_HWY_H);       // 2 ブロック四方 → 1 つあれば
+    expect(src.cell(8, BX >> 2, (BY - 3) >> 2)).toBe(T.T_HWY_H);       // 4 ブロック四方 → 2 つ以上 (3 つある)
+    expect(src.cell(7, BX >> 3, (BY - 3) >> 3)).not.toBe(T.T_HWY_H);   // 8 ブロック四方 → 4 つ要る (3 つしかない)
+  });
+
+  test("z8: 範囲外と、ブロックが少ししかない所は海 (多数決)", () => {
+    expect(src.cell(8, 0, 0)).toBe(T.T_WATER);
+    expect(src.cell(8, (BX + 1) >> 2, BY >> 2)).toBe(T.T_WATER);
   });
 
   test("全ズームで ID が範囲内", () => {
