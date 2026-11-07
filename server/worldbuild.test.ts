@@ -288,6 +288,7 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
 
     line({ landuse: "forest" }, box(10, 10, 50, 50), true);
     line({ building: "yes" }, box(20, 20, 24, 24), true);                      // 森の中の建物
+    line({ building: "yes" }, box(100, 200, 104, 204), true);                  // 何もない陸の建物 (周囲 3 マスが市街地になる)
     line({ highway: "residential" }, [[0.5, 80.5], [100.5, 80.5]]);               // 横の道路
     line({ highway: "residential" }, [[60.5, 60.5], [60.5, 110.5]]);              // 縦の道路 (60,80 で交差)
     line({ highway: "motorway" }, [[0.5, 120.5], [100.5, 120.5]]);
@@ -320,7 +321,7 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     let far = false;
     for (let i = 0; i < store.count; i++) if (store.minx.a[i] > (X0 + 1000) * FIX) far = true;
     expect(far).toBe(false);          // 範囲外の遠いウェイは読まれない
-    expect(store.count).toBe(9);
+    expect(store.count).toBe(10);
     const [mx0, my1] = cellToMeters(X0 - 300, Y0 - 300), [mx1, my0] = cellToMeters(X0 + 600, Y0 + 600);
     const land = await readPolygons(shp, [mx0, my0, mx1, my1]);
 
@@ -341,6 +342,14 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     expect(c(22, 22)).toBe(T.T_BUILDING);
     expect(c(100, 15)).toBe(T.T_GRASS);          // 陸 (x<128) で何もない
     expect(c(200, 15)).toBe(T.T_WATER);          // 陸地ポリゴンの外 = 海
+  });
+
+  test("建物の近くの「何もない陸」は市街地、遠くは草原", () => {
+    expect(c(101, 202)).toBe(T.T_BUILDING);
+    expect(c(97, 202)).toBe(T.T_URBAN);          // 建物 (x=100) から 3 マス
+    expect(c(96, 202)).toBe(T.T_GRASS);          // 4 マス
+    expect(c(101, 197)).toBe(T.T_URBAN);         // 上にも 3 マス
+    expect(c(101, 196)).toBe(T.T_GRASS);
   });
 
   test("道路・交差・踏切・高速道路", () => {

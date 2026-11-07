@@ -58,6 +58,9 @@ export function slopeLevels(elev: Float32Array, w: number, h: number, ymax: numb
 
 // ---- 塗る ----
 const GRASS = classId("natural", "grass"), SEA = classId("sea", "sea"), WATER = classId("natural", "water");
+const BUILDING = classId("building", "yes"), URBAN = classId("landuse", "residential");
+/** 建物からこのマス数以内の「何もない陸」は草ではなく市街地にする (OSM は建物の隙間や庭を塗っていないため) */
+export const URBAN_RADIUS = 3;
 const LAND = 64;                                  // 作業用: byte3 の bit6 = 陸地ポリゴンの内側
 const waterRank = CLASSES[WATER - 1].rank;
 const rankOf = (id: number) => CLASSES[id - 1]?.rank ?? 0;
@@ -72,22 +75,25 @@ const overlaps = (f: { minx: number; miny: number; maxx: number; maxy: number },
  * areas / lines は rank の昇順に並べておく (後から塗ったものが勝つ)。
  */
 export class Painter {
-  readonly w: number;
+  readonly w: number;            // 領域の 1 辺 (マス)
+  readonly stride: number;       // 余白つきの 1 辺。余白は市街地の判定がタイルの境目で途切れないようにする
   readonly cells: Uint8Array;
   private win: Window = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
-  constructor(readonly n: number) {
+  constructor(readonly n: number, readonly margin = URBAN_RADIUS) {
     this.w = n * BLOCK_SIZE;
-    this.cells = new Uint8Array(this.w * this.w * 4);
+    this.stride = this.w + 2 * margin;
+    this.cells = new Uint8Array(this.stride * this.stride * 4);
   }
 
   /** areas / lines は store.areas() / store.lines() (rank の昇順の番号)。 */
   paint(bx0: number, by0: number, land: Land[], store: FeatureStore, areas: Uint32Array, lines: Uint32Array): void {
-    const { w, cells } = this;
+    const { w, cells, margin, stride } = this;
     cells.fill(0);
-    const ox = bx0 * BLOCK_SIZE, oy = by0 * BLOCK_SIZE;
-    const win = this.win = { x0: ox, y0: oy, x1: ox + w, y1: oy + w };
-    const at = (x: number, y: number) => ((y - oy) * w + (x - ox)) * 4;
+    const ox = bx0 * BLOCK_SIZE - margin, oy = by0 * BLOCK_SIZE - margin;       // 余白の左上
+    const win = this.win = { x0: ox, y0: oy, x1: ox + stride, y1: oy + stride };
+    const at = (x: number, y: number) => ((y - oy) * stride + (x - ox)) * 4;
+    void w;
 
     for (const l of land) {
       if (overlaps(l, win)) {
@@ -113,17 +119,47 @@ export class Painter {
         });
       }
     }
+    this.urbanize();
+  }
+
+  /** 建物から URBAN_RADIUS マス以内で、面が何も塗られていない陸のマスを市街地にする。 */
+  private urbanize(): void {
+    const { stride: s, cells, margin: r } = this;
+    const n = s * s;
+    const near = new Uint8Array(n);                // 横方向に r マス以内に建物がある
+    for (let y = 0; y < s; y++) {
+      let cnt = 0;
+      for (let x = 0; x < Math.min(r, s); x++) if (cells[(y * s + x) * 4] === BUILDING) cnt++;
+      for (let x = 0; x < s; x++) {
+        const add = x + r, del = x - r - 1;
+        if (add < s && cells[(y * s + add) * 4] === BUILDING) cnt++;
+        if (del >= 0 && cells[(y * s + del) * 4] === BUILDING) cnt--;
+        near[y * s + x] = cnt > 0 ? 1 : 0;
+      }
+    }
+    for (let x = 0; x < s; x++) {
+      let cnt = 0;
+      for (let y = 0; y < Math.min(r, s); y++) cnt += near[y * s + x];
+      for (let y = 0; y < s; y++) {                // 縦方向にも r マス以内 (= 正方形 (2r+1) の範囲)
+        const add = y + r, del = y - r - 1;
+        if (add < s) cnt += near[add * s + x];
+        if (del >= 0) cnt -= near[del * s + x];
+        const o = (y * s + x) * 4;
+        if (cnt > 0 && cells[o] === 0 && cells[o + 3] & LAND) cells[o] = URBAN;
+      }
+    }
   }
 
   /**
-   * ブロック (i, j) (領域内の位置) を 4 バイトのマスにまとめる。何もない所は陸なら草原、海なら海。
+   * ブロック (i, j) (領域内の位置) を 4 バイトのマスにまとめる。何もない所は陸なら草原 (建物の近くは市街地)、海なら海。
    * 海だけのブロックは null (= 行を作らない)。slope は 256x256 の傾斜の段階。
    */
   block(i: number, j: number, slope?: Uint8Array | null): Uint8Array | null {
     const out = new Uint8Array(CELLS * 4);
     let allSea = true;
     for (let ly = 0; ly < BLOCK_SIZE; ly++) {
-      const src = ((j * BLOCK_SIZE + ly) * this.w + i * BLOCK_SIZE) * 4, dst = ly * BLOCK_SIZE * 4;
+      const m = this.margin;
+      const src = ((j * BLOCK_SIZE + ly + m) * this.stride + i * BLOCK_SIZE + m) * 4, dst = ly * BLOCK_SIZE * 4;
       for (let lx = 0; lx < BLOCK_SIZE; lx++) {
         const s = src + lx * 4, d = dst + lx * 4;
         const b3 = this.cells[s + 3];
