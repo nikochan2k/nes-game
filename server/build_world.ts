@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * OSM + 陸地ポリゴン + 標高 から data/world.sqlite を作る (doc/tile-conversion-plan.md の 6 章)。
+ * OSM + 陸地ポリゴン + 標高 から data/world.sqlite を作る (doc/map-spec.md の 6 章)。
  * Bun だけで動く (osmium も GDAL も不要)。
  *
  *   bun server/build_world.ts check

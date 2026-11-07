@@ -1,6 +1,6 @@
 /**
  * world.sqlite (worlddb.ts) から地形を動的に作る Source。
- * 判定規則は doc/tile-conversion-plan.md の 7〜8 章。
+ * 判定規則は doc/map-spec.md の 7〜8 章。
  *
  *   z11〜18 : ブロックの data (z18 のマス) を集約
  *   z6〜10  : ブロックの代表値を集約 (z1〜5 は間引き)

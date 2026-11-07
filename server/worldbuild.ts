@@ -1,5 +1,5 @@
 /**
- * world.sqlite を作る事前ビルドの中心部 (doc/tile-conversion-plan.md の 6 章)。
+ * world.sqlite を作る事前ビルドの中心部 (doc/map-spec.md の 6 章)。
  * 地物 (osmfeatures.ts) を z18 のマスに塗って (rasterize.ts)、ブロックにまとめる。
  */
 import { fillRings, linePath, linePathThin, type Window } from "./rasterize";

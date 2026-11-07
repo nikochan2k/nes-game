@@ -79,7 +79,7 @@ ROM の起動位置は、`data/start.json` (`data/` は `.gitignore` なので�
 ひな形は `cfg/start.example.json`。
 
 `make test` でサーバーのテストを実行する。`data/world.sqlite` (形式は `server/worlddb.ts`、
-`doc/tile-conversion-plan.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
+`doc/map-spec.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
 `server/mapserver.ts` のノイズで作った仮の世界を返す。`--db` でファイルを指定できる。
 
 `data/world.sqlite` は Bun だけで作れる (osmium / GDAL 不要)。入力は OSM の pbf (Geofabrik) と

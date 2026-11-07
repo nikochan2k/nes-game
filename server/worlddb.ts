@@ -1,5 +1,5 @@
 /**
- * world.sqlite の形式 (doc/tile-conversion-plan.md の 5 章)。
+ * world.sqlite の形式 (doc/map-spec.md の 5 章)。
  * 事前ビルド (将来のビルダー) と実行時 (osmsource.ts)、テストの試作 DB が共有する。
  */
 import { Database } from "bun:sqlite";
