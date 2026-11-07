@@ -8,23 +8,26 @@
 import { Database } from "bun:sqlite";
 import { inflateSync } from "node:zlib";
 import type { Source } from "./mapserver";
+import { crossingFor, railConnections, railPair, railTile } from "./rail";
 import * as T from "./terrain";
 import {
   B3_BRIDGE, B3_CLIFF, B3_HWY, B3_SLOPE_SHIFT, CLASSES, SLOPE_MOUNTAIN, SLOPE_ROCK,
 } from "./worlddb";
 
 // ---- 種別の意味 ----
-const K_OTHER = 0, K_BUILDING = 1, K_WATER = 2, K_WETLAND = 3, K_ROCK = 4, K_SCREE = 5, K_NATURAL = 6;
+const K_OTHER = 0, K_BUILDING = 1, K_WATER = 2, K_WETLAND = 3, K_ROCK = 4, K_SCREE = 5, K_NATURAL = 6, K_STATION = 7;
 
 const CAT_KIND: Record<string, number> = {
-  building: K_BUILDING, water: K_WATER, wetland: K_WETLAND, rock: K_ROCK, scree: K_SCREE,
+  building: K_BUILDING, water: K_WATER, wetland: K_WETLAND, rock: K_ROCK, scree: K_SCREE, station: K_STATION,
   grass: K_NATURAL, forest: K_NATURAL,
 };
+// 市街地は建物、農地は草と同じ地形にする (絵を増やさない)。雪 (glacier) は日本にほぼないので岩山にする
 const CAT_TERRAIN: Record<string, number> = {
-  grass: T.T_GRASS, forest: T.T_FOREST, urban: T.T_URBAN, building: T.T_BUILDING, sand: T.T_SAND,
-  snow: T.T_SNOW, farm: T.T_FARM, water: T.T_WATER, wetland: T.T_WETLAND, rock: T.T_ROCK,
-  scree: T.T_MOUNTAIN,
+  grass: T.T_GRASS, forest: T.T_FOREST, urban: T.T_BUILDING, building: T.T_BUILDING, sand: T.T_SAND,
+  snow: T.T_ROCK, farm: T.T_GRASS, water: T.T_WATER, wetland: T.T_WETLAND, rock: T.T_ROCK,
+  scree: T.T_MOUNTAIN, station: T.T_STATION,
 };
+
 
 // ---- ズームごとのしきい値 (8.3 の表。rank は worlddb.ts の CLASSES) ----
 const NONE = 1000;
@@ -165,7 +168,7 @@ export class OsmSource implements Source {
   // ---- 地形の決め方 (7 章 6〜11) ----
   private base(area: number, rock: boolean, mount: boolean): number {
     const k = this.kind[area];
-    if (k === K_BUILDING || k === K_WATER || k === K_WETLAND) {
+    if (k === K_BUILDING || k === K_WATER || k === K_WETLAND || k === K_STATION) {
       return this.terr[area];
     }
     if (rock) return T.T_ROCK;
@@ -215,7 +218,7 @@ export class OsmSource implements Source {
     const { rank, kind, counts } = this;
     counts.fill(0);
     let road = false, rail = false, hw = false, bridge = false, cross = false, waterN = 0;
-    let rockN = 0, mountN = 0;
+    let rockN = 0, mountN = 0, stationN = 0, stationId = 0;
     for (let yy = y0; yy < y0 + s; yy++) {
       for (let xx = x0; xx < x0 + s; xx++) {
         const o = (((yy & 255) << 8) | (xx & 255)) * 4;
@@ -232,7 +235,8 @@ export class OsmSource implements Source {
         if (t) rail = true;
         if (hwy && (b3 & B3_HWY)) hw = true;
         if (k === K_WATER) waterN++;
-        if (k !== K_BUILDING && k !== K_WATER && k !== K_WETLAND) {
+        if (k === K_STATION) { stationN++; stationId = a; }
+        if (k !== K_BUILDING && k !== K_WATER && k !== K_WETLAND && k !== K_STATION) {
           const slope = (b3 >> B3_SLOPE_SHIFT) & 7;
           if (k === K_ROCK || (b3 & B3_CLIFF) || slope >= SLOPE_ROCK) {
             rockN++;
@@ -242,7 +246,9 @@ export class OsmSource implements Source {
         }
       }
     }
-    const total = s * s, area = this.majority(counts);
+    const total = s * s;
+    // 駅は 1 つの駅に 1 マスだけなので、多数決では埋もれる。子マスに駅があれば駅にする
+    const area = stationN > 0 ? stationId : this.majority(counts);
     const rock = s <= 2 ? rockN > 0 : rockN * 100 >= ROCK_PCT * total;
     const mount = mountN * 100 >= MOUNT_PCT * total;
     if (road && waterN > 0) bridge = true;
@@ -281,13 +287,15 @@ export class OsmSource implements Source {
       | (road >= need ? F_ROAD : 0) | (hw >= need ? F_HWY : 0) | (rail >= need ? F_RAIL : 0);
   }
 
-  // ---- 向き (7.1) ----
-  /** mask のビットを持つ上下左右の隣から、0=横 1=縦 2=交差 を決める。 */
-  private dir(z: number, w: number, x: number, y: number, mask: number): number {
-    const has = (xx: number, yy: number) =>
-      yy >= 0 && yy < w && (this.feat(z, ((xx % w) + w) % w, yy) & mask) !== 0;
-    const h = has(x - 1, y) || has(x + 1, y), v = has(x, y - 1) || has(x, y + 1);
-    return h && v ? 2 : v ? 1 : 0;
+  /**
+   * 線路のつながる 2 方向 (server/rail.ts)。隣 (8 方向) のうち線路のあるものから決める。
+   */
+  private railPairAt(z: number, w: number, x: number, y: number): [number, number] {
+    const has = (dx: number, dy: number) => {
+      const yy = y + dy;
+      return yy >= 0 && yy < w && (this.feat(z, (((x + dx) % w) + w) % w, yy) & F_RAIL) !== 0;
+    };
+    return railPair(railConnections(has));
   }
 
   cell(z: number, x: number, y: number): number {
@@ -297,22 +305,21 @@ export class OsmSource implements Source {
     }
     x = ((x % w) + w) % w;
     const f = this.feat(z, x, y);
+    const base = f >> F_BASE_SHIFT;
+    if (base === T.T_STATION) {
+      return T.T_STATION;                 // 駅は道路や線路より優先 (1 つの駅に 1 マスだけ)
+    }
     if (f & F_CROSS) {
-      return T.T_CROSSING;
+      return crossingFor(this.railPairAt(z, w, x, y)) === "V" ? T.T_CROSSING_V : T.T_CROSSING_H;
     }
-    if (f & F_ROAD) {
-      const d = this.dir(z, w, x, y, F_ROAD);
-      if (f & F_BRIDGE) {
-        return d === 1 ? T.T_BRIDGE_V : d === 0 ? T.T_BRIDGE_H : T.T_ROAD_X;
-      }
-      return T.T_ROAD_H + d;
-    }
-    if (f & F_HWY) {
-      return T.T_HWY_H + this.dir(z, w, x, y, F_HWY);
+    if (f & (F_ROAD | F_HWY)) {
+      return T.T_ROAD;                    // 道路は向きのない 1 種 (高速道路も、水の上の橋も同じ)
     }
     if (f & F_RAIL) {
-      return T.T_RAIL_H + this.dir(z, w, x, y, F_RAIL);
+      const [a, b] = this.railPairAt(z, w, x, y);
+      return railTile(a, b);
     }
-    return f >> F_BASE_SHIFT;
+    return base;
   }
+
 }

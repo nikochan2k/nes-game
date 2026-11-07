@@ -20,7 +20,7 @@ import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { OsmSource } from "./osmsource";
 
-import { T_ROCK, T_ROAD_V, T_BRIDGE_V, T_ROAD_H, T_BRIDGE_H, T_ROAD_X, T_WATER, T_MOUNTAIN, T_FOREST, T_GRASS } from "./terrain";
+import { T_ROCK, T_ROAD, T_WATER, T_MOUNTAIN, T_FOREST, T_GRASS } from "./terrain";
 
 export * from "./terrain";
 
@@ -109,13 +109,13 @@ export class SyntheticSource implements Source {
     }
     if (z >= 9) {               // 拡大すると 32 マスおきに道路が通る
       if (x % 32 === 0 && y % 32 === 0) {
-        return T_ROAD_X;
+        return T_ROAD;
       }
       if (x % 32 === 0) {
-        return t === T_WATER ? T_BRIDGE_V : T_ROAD_V;
+        return T_ROAD;
       }
       if (y % 32 === 0) {
-        return t === T_WATER ? T_BRIDGE_H : T_ROAD_H;
+        return T_ROAD;
       }
     }
     return t;

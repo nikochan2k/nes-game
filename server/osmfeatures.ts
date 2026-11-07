@@ -125,7 +125,8 @@ const AREA_DEFS = CLASSES.map((c, i) => ({ ...c, id: i + 1 }))
   .sort((a, b) => b.rank - a.rank);                // 複数あれば rank の高い方
 export function areaClassOf(tags: Record<string, string>): number {
   for (const c of AREA_DEFS) {
-    if (c.key === "building" ? tags.building !== undefined && tags.building !== "no" : tags[c.key] === c.value) {
+    // building=yes は、train_station などの個別の値に当てはまらない建物すべて (rank が低いので最後に判定される)
+    if (c.key === "building" && c.value === "yes" ? tags.building !== undefined && tags.building !== "no" : tags[c.key] === c.value) {
       return c.id;
     }
   }
@@ -256,6 +257,7 @@ export interface LoadOptions {
 
 export interface Loaded {
   store: FeatureStore;
+  stationNodes: [number, number][];           // 点だけで登録されている駅 (マス座標)。railway=station / halt
   coast: Float64Array[];                      // 海岸線の鎖 (陸が進行方向の左)。マス座標
 }
 
@@ -313,9 +315,16 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
   let inBox: IdMap | null = new IdMap(1 << 16, false);
   const wId = new Grow(Float64Array), wStart = new Grow(Int32Array), wLen = new Grow(Int32Array);
   const wInfo = new Grow(Uint32Array), refs = new Grow(Float64Array, 1 << 16);
+  const stationNodes: [number, number][] = [];
   await scanPbf(pbf, {
     node(id, lat, lon) {
       if (lon >= w && lon <= e && lat >= s && lat <= n) inBox!.set(id);
+    },
+    taggedNode(_id, lat, lon, tags) {
+      // 駅は面ではなく点だけで登録されていることが多い (railway=station / halt、public_transport=station の鉄道駅)
+      const isStation = tags.railway === "station" || tags.railway === "halt"
+        || (tags.public_transport === "station" && tags.train === "yes");
+      if (isStation && lon >= w && lon <= e && lat >= s && lat <= n) stationNodes.push([lonToX(lon), latToY(lat)]);
     },
     way(id, tags, r) {
       const isMember = memberWays.has(id);
@@ -424,5 +433,6 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
   }).filter((c) => c.length >= 4);
   gc();
   log(`地物 ${store.count} (${mem()})`);
-  return { store, coast };
+  log(`駅のノード ${stationNodes.length} 個`);
+  return { store, coast, stationNodes };
 }

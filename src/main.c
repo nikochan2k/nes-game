@@ -39,19 +39,24 @@ enum { PROBE_NONE, PROBE_REQ, PROBE_OK, PROBE_BLOCKED };
 
 extern void wait_vblank(void);
 
-/* BG パレット: 0=緑 (草/森/農地/湿地) 1=茶/白 (山/砂/雪) 2=灰 (岩/道路/市街/線路) 3=青 (水/橋)
+/* BG パレット: 0=緑 (草/森/山/湿地) 1=黄/赤 (砂/建物) 2=黒/濃い灰/白 (岩山/道路/線路/駅) 3=青 (水)
  * (T_* の並び順) */
 static const unsigned char tile_pal[] = {
-    0, 0, 1, 2, 3, 3, 3, 2, 2, 2,
-    2, 2, 1, 1, 0, 0,
-    2, 2, 2, 2,
-    2, 2, 2
+    0, 0, 0,                    /* 草 森 山 */
+    2, 3,                       /* 岩山 水 */
+    1,                          /* 建物 (黄/赤) */
+    1, 0,                       /* 砂 湿地 */
+    2,                          /* 道路 */
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2,   /* 線路 20 種 */
+    2, 2,                       /* 踏切 (横 縦) */
+    2                           /* 駅 */
 };
 
 static const unsigned char palette[32] = {
     0x1A, 0x0A, 0x2A, 0x17,
-    0x1A, 0x17, 0x07, 0x30,
-    0x1A, 0x00, 0x10, 0x30,
+    0x1A, 0x28, 0x38, 0x16,   /* 砂・駅: 黄 淡い黄 赤 */
+    0x1A, 0x0F, 0x00, 0x30,   /* 黒 濃い灰 白 */
     0x1A, 0x11, 0x21, 0x17,
     0x1A, 0x0F, 0x36, 0x16,   /* 上半身: 髪 肌 キャップ */
     0x1A, 0x30, 0x12, 0x36,   /* 下半身: シャツ ジーンズ 肌 */
@@ -205,9 +210,10 @@ static void probe_run(void)
     PPU_ADDR = (unsigned char)probe_addr;
     t = PPU_DATA;                   /* 1 回目は読み捨て */
     t = PPU_DATA >> 2;
-    /* 線路・高速道路は z14 以上で通行不可 (z13 以下は地図が分断されるので通す) */
-    probe = (t == T_WATER || t == T_ROCK || t == T_BUILDING || t == T_WETLAND
-             || (z >= 14 && ((t >= T_RAIL_H && t <= T_RAIL_X) || t >= T_HWY_H)))
+    /* 線路は z14 以上で通行不可 (z13 以下は地図が分断されるので通す) */
+    probe = ((t >= T_ROCK && t <= T_BUILDING)           /* 岩山・水・建物 (ID が連続) */
+             || t == T_WETLAND
+             || (z >= 14 && t >= T_RAIL_FIRST && t <= T_RAIL_LAST))
             ? PROBE_BLOCKED : PROBE_OK;
 }
 

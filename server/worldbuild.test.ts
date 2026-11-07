@@ -7,13 +7,14 @@ import { FIX, FeatureStore, IdMap, areaClassOf, assembleRings, latToY, lineAttrs
 import { scanPbf } from "./osmpbf";
 import { OsmSource } from "./osmsource";
 import { assembleChains, landFromCoast } from "./coast";
-import { fillRings, lineCells } from "./rasterize";
+import { fillRings, lineCells, linePathThin } from "./rasterize";
+import { RAIL_PAIRS, crossingFor, railConnections, railPair, railTile } from "./rail";
 import { readPolygons } from "./shapefile";
 import * as T from "./terrain";
 import {
   cellToLonLat, cellToMeters, elevationToRgb, encodePng, writePbf, writeShp, type TNode, type TWay,
 } from "./testutil";
-import { BLOCK_M, CELL_M, MERC, Painter, blockRange, lonLatToBlock, slopeLevel, slopeLevels } from "./worldbuild";
+import { BLOCK_M, CELL_M, MERC, Painter, blockRange, lonLatToBlock, slopeLevel, slopeLevels, stationMarkers } from "./worldbuild";
 import { BLOCK_SIZE, classId, createDb, writeBlock } from "./worlddb";
 
 let dir: string;
@@ -146,6 +147,93 @@ describe("海岸線から陸", () => {
   });
 });
 
+describe("細い線 (線路用の 8 連結)", () => {
+  const win = { x0: -50, y0: -50, x1: 150, y1: 150 };
+  const cellsOf = (path: number[]) => {
+    const out = new Set<string>();
+    linePathThin(Float64Array.from(path), win, (x, y) => out.add(`${x},${y}`));
+    return out;
+  };
+  /** 8 連結の成分の数 */
+  const components = (cells: Set<string>) => {
+    const seen = new Set<string>(); let n = 0;
+    for (const start of cells) {
+      if (seen.has(start)) continue;
+      n++;
+      const stack = [start]; seen.add(start);
+      while (stack.length) {
+        const [x, y] = stack.pop()!.split(",").map(Number);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const k = `${x + dx},${y + dy}`;
+          if (cells.has(k) && !seen.has(k)) { seen.add(k); stack.push(k); }
+        }
+      }
+    }
+    return n;
+  };
+
+  test("45° の線は、1 マスに 1 つの斜めの鎖", () => {
+    const c = cellsOf([0.5, 0.5, 10.5, 10.5]);
+    expect([...c].sort()).toEqual(Array.from({ length: 11 }, (_, i) => `${i},${i}`).sort());
+  });
+
+  test("横の線は、各列に 1 マス。緩やかな角度の線は 8 連結で、横の走りと斜めの 1 歩になる", () => {
+    expect(cellsOf([0.5, 5.5, 9.5, 5.5]).size).toBe(10);
+    const c = cellsOf([0.5, 0.5, 30.5, 10.5]);                  // 傾き 1/3
+    expect(components(c)).toBe(1);
+    expect(c.size).toBeLessThanOrEqual(33);                     // 1 列に 1 マス (斜めの歩みを含めて)
+    const cols = new Map<number, number>();
+    for (const k of c) { const x = Number(k.split(",")[0]); cols.set(x, (cols.get(x) ?? 0) + 1); }
+    expect([...cols.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  test("円弧は途切れず 1 本につながる (傾き 45° 付近で 1 マス飛ばない)", () => {
+    for (const r of [6, 9, 15, 40]) {
+      const arc: number[] = [];
+      for (let a = 200; a <= 340; a += 2) arc.push(50 + r * Math.cos((a * Math.PI) / 180), 50 + r * Math.sin((a * Math.PI) / 180));
+      expect(components(cellsOf(arc))).toBe(1);
+    }
+  });
+
+  test("折れ線の継ぎ目や、窓の外は塗らない", () => {
+    const c = cellsOf([140.5, 10.5, 160.5, 10.5]);               // 窓は x < 150
+    expect(Math.max(...[...c].map((k) => Number(k.split(",")[0])))).toBe(149);
+  });
+});
+
+describe("線路のタイル (server/rail.ts)", () => {
+  test("組み合わせは 20 種: 直線 4 + 45° の曲がり 8 + 90° の曲がり 8", () => {
+    expect(RAIL_PAIRS.length).toBe(20);
+    const sep = (a: number, b: number) => Math.min(b - a, 8 - (b - a));
+    expect(RAIL_PAIRS.filter(([a, b]) => sep(a, b) === 4).length).toBe(4);
+    expect(RAIL_PAIRS.filter(([a, b]) => sep(a, b) === 3).length).toBe(8);
+    expect(RAIL_PAIRS.filter(([a, b]) => sep(a, b) === 2).length).toBe(8);
+    expect(new Set(RAIL_PAIRS.map(([a, b]) => railTile(a, b))).size).toBe(20);
+  });
+
+  test("通る 2 方向の選び方", () => {
+    expect(railPair([])).toEqual([0, 4]);                         // 孤立: 横
+    expect(railPair([6])).toEqual([6, 2]);                        // 端: その方向の直線
+    expect(railPair([0, 4, 2])).toEqual([0, 4]);                  // T 字: まっすぐな方
+    expect(railPair([0, 2])).toEqual([0, 2]);                     // 90° の曲がり
+    expect(railPair([0, 1])).toEqual([0, 4]);                     // 鋭い折り返し (45°) は直線にする
+    expect(railPair([0, 1, 2, 3, 4, 5, 6, 7])).toEqual([0, 4]);   // 全方向: 横
+  });
+
+  test("斜めの隣は、挟む上下左右に線路があれば捨てる (L 字の角を近道しない)", () => {
+    const at = (cells: [number, number][]) => (dx: number, dy: number) => cells.some(([x, y]) => x === dx && y === dy);
+    expect(railConnections(at([[1, 0], [0, 1], [1, 1]]))).toEqual([0, 2]);   // 東・南は残り、南東は捨てる
+    expect(railConnections(at([[1, 1]]))).toEqual([1]);                      // 斜めだけなら残す
+  });
+
+  test("踏切の向き: 線路が横寄りなら H、縦寄りなら V", () => {
+    expect(crossingFor([0, 4])).toBe("H");
+    expect(crossingFor([2, 6])).toBe("V");
+    expect(crossingFor([1, 5])).toBe("H");
+    expect(crossingFor([0, 2])).toBe("H");
+  });
+});
+
 describe("PBF と地物", () => {
   test("タグの意味", () => {
     expect(areaClassOf({ landuse: "forest", building: "no" })).toBe(classId("landuse", "forest"));
@@ -182,21 +270,23 @@ describe("PBF と地物", () => {
 
   test("PBF を読み戻す", async () => {
     const path = join(dir, "t.pbf");
-    const nodes: TNode[] = [{ id: 10, lat: 35.5, lon: 139.5 }, { id: 4294967400, lat: 35.6, lon: 139.6 },
-      { id: 4294967500, lat: -10.25, lon: -70.125 }];
+    const nodes: TNode[] = [{ id: 10, lat: 35.5, lon: 139.5, tags: { railway: "station", name: "テスト駅" } },
+      { id: 4294967400, lat: 35.6, lon: 139.6 }, { id: 4294967500, lat: -10.25, lon: -70.125, tags: { amenity: "cafe" } }];
     await writePbf(path, {
       nodes,
       ways: [{ id: 1, tags: { highway: "residential", name: "x" }, refs: [10, 4294967400, 4294967500] }],
       rels: [{ id: 9, tags: { type: "multipolygon", landuse: "forest" },
         members: [{ type: 1, id: 1, role: "outer" }, { type: 1, id: 5, role: "inner" }] }],
     });
-    const got = { n: [] as number[][], w: [] as unknown[], r: [] as unknown[] };
+    const got = { n: [] as number[][], t: [] as unknown[], w: [] as unknown[], r: [] as unknown[] };
     await scanPbf(path, {
       node: (id, lat, lon) => got.n.push([id, lat, lon]),
+      taggedNode: (id, _lat, _lon, tags) => got.t.push([id, tags]),
       way: (id, tags, refs) => got.w.push([id, tags, refs]),
       relation: (id, tags, m) => got.r.push([id, tags, m]),
     });
     expect(got.n.length).toBe(3);
+    expect(got.t).toEqual([[10, { railway: "station", name: "テスト駅" }], [4294967500, { amenity: "cafe" }]]);   // タグのあるノードだけ
     expect(got.n[1][0]).toBe(4294967400);
     expect(got.n[2][1]).toBeCloseTo(-10.25, 6);
     expect(got.n[2][2]).toBeCloseTo(-70.125, 6);
@@ -263,6 +353,25 @@ describe("shapefile / 標高", () => {
   });
 });
 
+describe("駅のマスの位置", () => {
+  const sq = (a: number, b: number) => Float64Array.from([a, a, b, a, b, b, a, b]);
+  const mk = () => {
+    const store = new FeatureStore();
+    store.add({ rank: 11, area: classId("public_transport", "station") }, [sq(100, 140)]);     // 重心 (120, 120)
+    return store;
+  };
+
+  test("点の駅を先に採用し、近くの面の重心は捨てる", () => {
+    expect(stationMarkers(mk(), [[110, 110]])).toEqual([[110, 110]]);              // 面の重心から 14 マス
+  });
+
+  test("遠ければ両方。点どうしの重複は間引く", () => {
+    expect(stationMarkers(mk(), [[400, 400]])).toEqual([[400, 400], [120, 120]]);
+    expect(stationMarkers(mk(), [[400, 400], [405, 402]])).toEqual([[400, 400], [120, 120]]);
+    expect(stationMarkers(new FeatureStore(), [])).toEqual([]);
+  });
+});
+
 describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () => {
   const bx = 14552, by = 6451, X0 = bx * 256, Y0 = by * 256;
   let src: OsmSource;
@@ -289,6 +398,13 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     line({ landuse: "forest" }, box(10, 10, 50, 50), true);
     line({ building: "yes" }, box(20, 20, 24, 24), true);                      // 森の中の建物
     line({ building: "yes" }, box(100, 200, 104, 204), true);                  // 何もない陸の建物 (周囲 3 マスが市街地になる)
+    {                                                                          // 点だけの駅 (x=150 は海。駅のマスは海の上でも出る)
+      const [lon, lat] = ll(150.5, 100.5);
+      nodes.push({ id: nid, lat, lon, tags: { railway: "station", name: "点の駅" } });
+      nid++;
+    }
+    line({ building: "train_station" }, box(200, 220, 204, 224), true);        // 駅舎 (4x4 マス)
+    line({ public_transport: "station" }, box(190, 210, 214, 234), true);      // 駅の敷地 (同じ駅 → 駅のマスは 1 つだけ)
     line({ highway: "residential" }, [[0.5, 80.5], [100.5, 80.5]]);               // 横の道路
     line({ highway: "residential" }, [[60.5, 60.5], [60.5, 110.5]]);              // 縦の道路 (60,80 で交差)
     line({ highway: "motorway" }, [[0.5, 120.5], [100.5, 120.5]]);
@@ -317,16 +433,18 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
     await writeShp(shp, [[[[X0 - 500, Y0 - 500], [X0 + 128, Y0 - 500], [X0 + 128, Y0 + 700], [X0 - 500, Y0 + 700]]]]);
 
     const [w, n] = ll(10, 10), [e, s] = ll(250, 250);
-    const { store } = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
+    const { store, stationNodes } = await loadFeatures(pbf, { bbox: [w, s, e, n], margin: 0.001 });
+    expect(stationNodes.length).toBe(1);
     let far = false;
     for (let i = 0; i < store.count; i++) if (store.minx.a[i] > (X0 + 1000) * FIX) far = true;
     expect(far).toBe(false);          // 範囲外の遠いウェイは読まれない
-    expect(store.count).toBe(10);
+    expect(store.count).toBe(12);
     const [mx0, my1] = cellToMeters(X0 - 300, Y0 - 300), [mx1, my0] = cellToMeters(X0 + 600, Y0 + 600);
     const land = await readPolygons(shp, [mx0, my0, mx1, my1]);
 
     const p = new Painter(1);
-    p.paint(bx, by, land, store, store.areas(), store.lines());
+    expect(stationMarkers(store, stationNodes)).toEqual([[X0 + 150, Y0 + 100], [X0 + 202, Y0 + 222]]);   // 点の駅が先、面の駅が後
+    p.paint(bx, by, land, store, store.areas(), store.lines(), stationMarkers(store, stationNodes));
     const cells = p.block(0, 0)!;
     const db = createDb(join(dir, "e2e.sqlite"));
     writeBlock(db, bx, by, cells);
@@ -346,24 +464,37 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
 
   test("建物の近くの「何もない陸」は市街地、遠くは草原", () => {
     expect(c(101, 202)).toBe(T.T_BUILDING);
-    expect(c(97, 202)).toBe(T.T_URBAN);          // 建物 (x=100) から 3 マス
+    expect(c(97, 202)).toBe(T.T_BUILDING);          // 建物 (x=100) から 3 マス
     expect(c(96, 202)).toBe(T.T_GRASS);          // 4 マス
-    expect(c(101, 197)).toBe(T.T_URBAN);         // 上にも 3 マス
+    expect(c(101, 197)).toBe(T.T_BUILDING);         // 上にも 3 マス
     expect(c(101, 196)).toBe(T.T_GRASS);
   });
 
+  test("駅は 1 つの駅に 1 マスだけ。駅舎のほかのマスは線路", () => {
+    expect(c(202, 222)).toBe(T.T_STATION);           // 駅舎の重心
+    expect(c(200, 220)).toBe(railTile(0, 2));        // 駅舎のほかのマスは線路 (隣の線路で向きが決まる)
+    expect(c(203, 223)).toBe(railTile(4, 6));
+    expect(c(201, 221)).toBe(railTile(0, 4));        // 内側は、まっすぐな横
+    expect(c(150, 100)).toBe(T.T_STATION);           // 点だけの駅
+    expect(c(195, 215)).not.toBe(T.T_STATION);       // 敷地 (public_transport) は線路にしない
+    expect(c(195, 215)).not.toBe(railTile(0, 4));
+    let stations = 0;
+    for (let y = 205; y < 240; y++) for (let x = 185; x < 220; x++) if (c(x, y) === T.T_STATION) stations++;
+    expect(stations).toBe(1);
+  });
+
   test("道路・交差・踏切・高速道路", () => {
-    expect(c(45, 80)).toBe(T.T_ROAD_H);
-    expect(c(60, 70)).toBe(T.T_ROAD_V);
-    expect(c(60, 80)).toBe(T.T_ROAD_X);
-    expect(c(30, 70)).toBe(T.T_RAIL_V);
-    expect(c(30, 80)).toBe(T.T_CROSSING);
-    expect(c(50, 120)).toBe(T.T_HWY_H);
+    expect(c(45, 80)).toBe(T.T_ROAD);
+    expect(c(60, 70)).toBe(T.T_ROAD);
+    expect(c(60, 80)).toBe(T.T_ROAD);
+    expect(c(30, 70)).toBe(railTile(2, 6));
+    expect(c(30, 80)).toBe(T.T_CROSSING_V);
+    expect(c(50, 120)).toBe(T.T_ROAD);
   });
 
   test("川と橋", () => {
     expect(c(80, 30)).toBe(T.T_WATER);
-    expect(c(80, 140)).toBe(T.T_BRIDGE_H);       // 川の上の道路
+    expect(c(80, 140)).toBe(T.T_ROAD);       // 川の上の道路
   });
 
   test("湖: multipolygon の穴は水にならない", () => {

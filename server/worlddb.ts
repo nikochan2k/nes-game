@@ -14,7 +14,7 @@ export const KIND_AREA = 0, KIND_ROAD = 1, KIND_RAIL = 2;
 /** 面の意味。種別ごとにゲームの地形が決まる (osmsource.ts の AREA_TERRAIN)。 */
 export type AreaCat =
   | "grass" | "forest" | "urban" | "building" | "sand" | "snow" | "farm"
-  | "water" | "wetland" | "rock" | "scree";
+  | "water" | "wetland" | "rock" | "scree" | "station";
 
 export interface ClassDef {
   kind: number;
@@ -71,6 +71,11 @@ export const CLASSES: ClassDef[] = [
   { kind: KIND_RAIL, key: "railway", value: "subway", rank: 70 },
   { kind: KIND_RAIL, key: "railway", value: "light_rail", rank: 60 },
   { kind: KIND_RAIL, key: "railway", value: "tram", rank: 50 },
+  // 駅 (面)。既存の id がずれないよう末尾に足す。建物 (rank 10) より上に塗る
+  { kind: KIND_AREA, key: "building", value: "train_station", rank: 11, cat: "station" },
+  { kind: KIND_AREA, key: "public_transport", value: "station", rank: 11, cat: "station" },
+  { kind: KIND_AREA, key: "railway", value: "station", rank: 11, cat: "station" },
+  { kind: KIND_AREA, key: "railway", value: "platform", rank: 11, cat: "station" },
 ];
 
 export function classId(key: string, value: string): number {

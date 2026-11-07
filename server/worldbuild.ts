@@ -2,7 +2,7 @@
  * world.sqlite を作る事前ビルドの中心部 (doc/tile-conversion-plan.md の 6 章)。
  * 地物 (osmfeatures.ts) を z18 のマスに塗って (rasterize.ts)、ブロックにまとめる。
  */
-import { fillRings, linePath, type Window } from "./rasterize";
+import { fillRings, linePath, linePathThin, type Window } from "./rasterize";
 import { FL_BRIDGE, FL_CLIFF, FL_HWY, FL_RIVER, type FeatureStore } from "./osmfeatures";
 import {
   B3_BRIDGE, B3_CLIFF, B3_HWY, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
@@ -59,6 +59,66 @@ export function slopeLevels(elev: Float32Array, w: number, h: number, ymax: numb
 // ---- 塗る ----
 const GRASS = classId("natural", "grass"), SEA = classId("sea", "sea"), WATER = classId("natural", "water");
 const BUILDING = classId("building", "yes"), URBAN = classId("landuse", "residential");
+const RAIL = classId("railway", "rail");
+// 駅の面。駅のマスは「1 つの駅に 1 マスだけ」(stationMarkers)、面のほかのマスは線路にする。
+// 駅舎 (building=train_station)・railway=station・ホーム (railway=platform) の面は線路にする。
+// public_transport=station は敷地全体を囲んで大きいので、線路にはせず、駅のマスの位置にだけ使う。
+const ST_BUILDING = classId("building", "train_station"), ST_PT = classId("public_transport", "station");
+const ST_RAILWAY = classId("railway", "station"), ST_PLATFORM = classId("railway", "platform");
+const isStationArea = (id: number) => id === ST_BUILDING || id === ST_PT || id === ST_RAILWAY || id === ST_PLATFORM;
+const stationToRail = (id: number) => id === ST_BUILDING || id === ST_RAILWAY || id === ST_PLATFORM;
+/** 駅のマスの面種別 (osmsource が駅として出す) */
+export const STATION_CELL = ST_BUILDING;
+
+/** 面 (輪の列) の重心と面積。最大の輪だけを使う。 */
+function ringCentroid(rings: Float64Array[]): { x: number; y: number; size: number } {
+  let best = { x: 0, y: 0, size: -1 };
+  for (const r of rings) {
+    const n = r.length / 2;
+    let a = 0, cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n, cross = r[i * 2] * r[j * 2 + 1] - r[j * 2] * r[i * 2 + 1];
+      a += cross; cx += (r[i * 2] + r[j * 2]) * cross; cy += (r[i * 2 + 1] + r[j * 2 + 1]) * cross;
+    }
+    let c: { x: number; y: number; size: number };
+    if (Math.abs(a) < 1e-9) {
+      let mx = 0, my = 0;
+      for (let i = 0; i < n; i++) { mx += r[i * 2]; my += r[i * 2 + 1]; }
+      c = { x: mx / n, y: my / n, size: 0 };
+    } else {
+      c = { x: cx / (3 * a), y: cy / (3 * a), size: Math.abs(a) / 2 };
+    }
+    if (c.size > best.size) best = c;
+  }
+  return best;
+}
+
+/**
+ * 駅のマスの位置 (マス座標) を、1 つの駅に 1 つだけ決める。
+ * 点だけで登録された駅 (nodes) は位置が正確なので先に採用し、駅の面 (駅舎・railway=station・public_transport=station)
+ * の重心は、近く (radius マス以内) に駅がなければ使う (面の重心は敷地の端に寄ることがあるため)。
+ * 面は大きい方から。点どうしの重複は nodeRadius マス以内で間引く。
+ */
+export function stationMarkers(store: FeatureStore, nodes: [number, number][] = [], radius = 40,
+  nodeRadius = 25): [number, number][] {
+  const kept: { x: number; y: number }[] = [];
+  const near = (x: number, y: number, r: number) => kept.some((k) => Math.hypot(k.x - x, k.y - y) < r);
+  for (const [x, y] of nodes) {
+    if (!near(x, y, nodeRadius)) kept.push({ x, y });
+  }
+  const cand: { x: number; y: number; size: number }[] = [];
+  for (const i of store.areas()) {
+    const id = store.area.a[i];
+    if (id !== ST_BUILDING && id !== ST_PT && id !== ST_RAILWAY) continue;
+    const c = ringCentroid(store.partsOf(i));
+    if (c.size >= 0) cand.push(c);
+  }
+  cand.sort((a, b) => b.size - a.size);
+  for (const c of cand) {
+    if (!near(c.x, c.y, radius)) kept.push(c);
+  }
+  return kept.map((k) => [Math.floor(k.x), Math.floor(k.y)]);
+}
 /** 建物からこのマス数以内の「何もない陸」は草ではなく市街地にする (OSM は建物の隙間や庭を塗っていないため) */
 export const URBAN_RADIUS = 3;
 const LAND = 64;                                  // 作業用: byte3 の bit6 = 陸地ポリゴンの内側
@@ -87,7 +147,8 @@ export class Painter {
   }
 
   /** areas / lines は store.areas() / store.lines() (rank の昇順の番号)。 */
-  paint(bx0: number, by0: number, land: Land[], store: FeatureStore, areas: Uint32Array, lines: Uint32Array): void {
+  paint(bx0: number, by0: number, land: Land[], store: FeatureStore, areas: Uint32Array, lines: Uint32Array,
+    stations: [number, number][] = []): void {
     const { w, cells, margin, stride } = this;
     cells.fill(0);
     const ox = bx0 * BLOCK_SIZE - margin, oy = by0 * BLOCK_SIZE - margin;       // 余白の左上
@@ -103,6 +164,15 @@ export class Painter {
     for (const i of areas) {
       if (!store.overlaps(i, win)) continue;
       const id = store.area.a[i];
+      if (isStationArea(id)) {
+        // 駅の面は面としては塗らず、線路にする (駅のマスは下で 1 つだけ置く)
+        if (stationToRail(id)) {
+          fillRings(store.partsOf(i), win, (y, xa, xb) => {
+            for (let x = xa; x < xb; x++) { const o = at(x, y) + 2; if (cells[o] === 0) cells[o] = RAIL; }
+          });
+        }
+        continue;
+      }
       fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y)] = id; });
     }
     for (const i of lines) {
@@ -110,14 +180,19 @@ export class Painter {
       const road = store.road.a[i], rail = store.rail.a[i], fl = store.flags.a[i];
       const b3 = (fl & FL_HWY ? B3_HWY : 0) | (fl & FL_BRIDGE ? B3_BRIDGE : 0) | (fl & FL_CLIFF ? B3_CLIFF : 0);
       for (const p of store.partsOf(i)) {
-        linePath(p, win, (x, y) => {
+        const plot = (x: number, y: number) => {
           const o = at(x, y);
           if (fl & FL_RIVER && (cells[o] === 0 || rankOf(cells[o]) < waterRank)) cells[o] = WATER;
           if (road) cells[o + 1] = road;
           if (rail) cells[o + 2] = rail;
           cells[o + 3] |= b3;
-        });
+        };
+        // 線路は 1 マスに 1 つの細い線 (8 連結) で塗る。斜めの線路が階段状にならず、斜めのタイルでつなげられる
+        if (rail) linePathThin(p, win, plot); else linePath(p, win, plot);
       }
+    }
+    for (const [sx, sy] of stations) {                // 駅のマス (1 つの駅に 1 つ)
+      if (sx >= win.x0 && sx < win.x1 && sy >= win.y0 && sy < win.y1) cells[at(sx, sy)] = STATION_CELL;
     }
     this.urbanize();
   }

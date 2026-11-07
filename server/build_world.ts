@@ -21,7 +21,7 @@ import { Dem } from "./dem";
 import { landFromCoast } from "./coast";
 import { loadFeatures, xToLon, yToLat } from "./osmfeatures";
 import { readPolygons } from "./shapefile";
-import { BLOCK_M, MERC, Painter, blockRange, type Land } from "./worldbuild";
+import { BLOCK_M, MERC, Painter, blockRange, stationMarkers, type Land } from "./worldbuild";
 import { BLOCK_SIZE, createDb, writeBlock } from "./worlddb";
 
 const DEFAULTS = {
@@ -59,10 +59,11 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   const win = { x0: bx0 * BLOCK_SIZE, y0: by0 * BLOCK_SIZE, x1: (bx1 + 1) * BLOCK_SIZE, y1: (by1 + 1) * BLOCK_SIZE };
   // 地物はブロックの範囲全体 (+margin) を読む
   const bbox: [number, number, number, number] = [xToLon(win.x0), yToLat(win.y1), xToLon(win.x1), yToLat(win.y0)];
-  const { store, coast } = await loadFeatures(o.pbf, { bbox, margin: o.margin, log: lap });
+  const { store, coast, stationNodes } = await loadFeatures(o.pbf, { bbox, margin: o.margin, log: lap });
   const areas = store.areas(), lines = store.lines();
+  const stations = stationMarkers(store, stationNodes);
   gc();
-  lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本`);
+  lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本、駅 ${stations.length} 個`);
 
   let land: Land[];
   if (o.land) {
@@ -83,7 +84,7 @@ async function build(o: typeof DEFAULTS & { bbox: [number, number, number, numbe
   let blocks = 0;
   for (let ty = by0; ty <= by1; ty += o.tile) {
     for (let tx = bx0; tx <= bx1; tx += o.tile) {
-      painter.paint(tx, ty, land, store, areas, lines);
+      painter.paint(tx, ty, land, store, areas, lines, stations);
       db.transaction(() => {
         for (let j = 0; j < o.tile; j++) {
           for (let i = 0; i < o.tile; i++) {

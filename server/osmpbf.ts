@@ -11,6 +11,8 @@ export interface Member { type: 0 | 1 | 2; id: number; role: string }   // 0=nod
 
 export interface Handlers {
   node?(id: number, lat: number, lon: number): void;
+  /** タグのあるノードだけ (タグを読むぶん遅くなるので、必要なときだけ指定する)。 */
+  taggedNode?(id: number, lat: number, lon: number, tags: Record<string, string>): void;
   way?(id: number, tags: Record<string, string>, refs: number[]): void;
   relation?(id: number, tags: Record<string, string>, members: Member[]): void;
 }
@@ -91,20 +93,36 @@ function decodeBlock(data: Uint8Array, h: Handlers) {
 
   for (const [gs, ge] of groups) {
     fields(gs, ge, (f, _w, a, b) => {
-      if (f === 1 && h.node) {                        // Node (密でない形式)
-        let id = 0, lat = 0, lon = 0;
-        fields(a, b, (f2, _w2, x) => {
+      if (f === 1 && (h.node || h.taggedNode)) {        // Node (密でない形式)
+        let id = 0, lat = 0, lon = 0, ks: number[] = [], vs: number[] = [];
+        fields(a, b, (f2, _w2, x, e) => {
           if (f2 === 1) id = zigzag(x); else if (f2 === 8) lat = zigzag(x); else if (f2 === 9) lon = zigzag(x);
+          else if (f2 === 2) ks = packed(x, e, false, false); else if (f2 === 3) vs = packed(x, e, false, false);
         });
-        h.node(id, toDeg(latOff, lat), toDeg(lonOff, lon));
-      } else if (f === 2 && h.node) {                 // DenseNodes
-        let ids: number[] = [], lats: number[] = [], lons: number[] = [];
+        h.node?.(id, toDeg(latOff, lat), toDeg(lonOff, lon));
+        if (h.taggedNode && ks.length > 0) h.taggedNode(id, toDeg(latOff, lat), toDeg(lonOff, lon), tagsOf(ks, vs));
+      } else if (f === 2 && (h.node || h.taggedNode)) { // DenseNodes
+        let ids: number[] = [], lats: number[] = [], lons: number[] = [], kv: number[] = [];
         fields(a, b, (f2, _w2, s, e) => {
           if (f2 === 1) ids = packed(s, e, true, true);
           else if (f2 === 8) lats = packed(s, e, true, true);
           else if (f2 === 9) lons = packed(s, e, true, true);
+          else if (f2 === 10 && h.taggedNode) kv = packed(s, e, false, false);   // 鍵と値の対が、ノードごとに 0 で終わる
         });
-        for (let i = 0; i < ids.length; i++) h.node(ids[i], toDeg(latOff, lats[i]), toDeg(lonOff, lons[i]));
+        let k = 0;
+        for (let i = 0; i < ids.length; i++) {
+          const lat = toDeg(latOff, lats[i]), lon = toDeg(lonOff, lons[i]);
+          h.node?.(ids[i], lat, lon);
+          if (h.taggedNode) {
+            let tags: Record<string, string> | null = null;
+            while (k < kv.length && kv[k] !== 0) {
+              (tags ??= {})[strings[kv[k]]] = strings[kv[k + 1]];
+              k += 2;
+            }
+            k++;                                   // ノードの区切りの 0
+            if (tags) h.taggedNode(ids[i], lat, lon, tags);
+          }
+        }
       } else if (f === 3 && h.way) {
         let id = 0, ks: number[] = [], vs: number[] = [], refs: number[] = [];
         fields(a, b, (f2, w2, s, e) => {

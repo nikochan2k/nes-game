@@ -25,7 +25,7 @@ const num = (f: number, n: number) => cat(varint(f * 8), varint(n));
 const packed = (f: number, vs: number[]) => bytes(f, vs.flatMap(varint));
 const delta = (vs: number[]) => vs.map((v, i) => zz(v - (i ? vs[i - 1] : 0)));
 
-export interface TNode { id: number; lat: number; lon: number }
+export interface TNode { id: number; lat: number; lon: number; tags?: Record<string, string> }
 export interface TWay { id: number; tags: Record<string, string>; refs: number[] }
 export interface TRel { id: number; tags: Record<string, string>; members: { type: 0 | 1 | 2; id: number; role: string }[] }
 
@@ -55,10 +55,14 @@ function block(build: (s: ReturnType<typeof strings>) => number[]): number[] {
 export async function writePbf(path: string, d: { nodes?: TNode[]; ways?: TWay[]; rels?: TRel[] }) {
   const out: number[] = blob("OSMHeader", []);
   if (d.nodes?.length) {
-    out.push(...block(() => bytes(2, cat(
-      packed(1, delta(d.nodes!.map((n) => n.id).map((id) => id)).map((v) => v)),
-      packed(8, delta(d.nodes!.map((n) => Math.round(n.lat * 1e7))).map((v) => v)),
-      packed(9, delta(d.nodes!.map((n) => Math.round(n.lon * 1e7))).map((v) => v)),
+    out.push(...block((st) => bytes(2, cat(
+      packed(1, delta(d.nodes!.map((n) => n.id))),
+      packed(8, delta(d.nodes!.map((n) => Math.round(n.lat * 1e7)))),
+      packed(9, delta(d.nodes!.map((n) => Math.round(n.lon * 1e7)))),
+      // keys_vals: ノードごとに 鍵 値 鍵 値 ... 0 (タグがなければ 0 だけ)
+      d.nodes!.some((n) => n.tags)
+        ? packed(10, d.nodes!.flatMap((n) => [...Object.entries(n.tags ?? {}).flatMap(([k, v]) => [st.id(k), st.id(v)]), 0]))
+        : [],
     ))));
   }
   if (d.ways?.length) {

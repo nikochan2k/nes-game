@@ -88,3 +88,50 @@ export function linePath(path: Float64Array, win: Window, plot: Plot): void {
     lineCells(path[i], path[i + 1], path[i + 2], path[i + 3], win, plot);
   }
 }
+
+/**
+ * 細い線 (8 連結): 線が通るマスのうち、1 マスに 1 つの鎖だけを塗る (線路用)。
+ * 折れ線を細かくたどり、各列の中心線 (x=cx+0.5) を横切る所のマス (線が横向きに近い所)、
+ * 各行の中心線を横切る所のマス (縦向きに近い所) を取る。45° の線は 1 本の斜めの鎖になり、
+ * 緩やかな角度の線は「横 横 横 斜め 横 横 横…」と並ぶので、階段状のぎざぎざにならない。
+ * 「横向きか縦向きか」は、前後 window マスの平均の傾きで決める。傾き 45° 付近 (0.8〜1.25 倍) では、
+ * 判定の切り替わりで 1 マス飛ばないように、列と行の両方を取る。
+ */
+export function linePathThin(path: Float64Array, win: Window, plot: Plot, step = 0.05, window = 1.5): void {
+  const n = path.length / 2;
+  if (n < 2) return;
+  let total = 1;
+  for (let i = 0; i + 1 < n; i++) total += Math.max(1, Math.ceil(Math.hypot(path[i * 2 + 2] - path[i * 2], path[i * 2 + 3] - path[i * 2 + 1]) / step));
+  const X = new Float64Array(total), Y = new Float64Array(total);
+  let m = 0;
+  for (let i = 0; i + 1 < n; i++) {
+    const ax = path[i * 2], ay = path[i * 2 + 1], bx = path[i * 2 + 2], by = path[i * 2 + 3];
+    const k = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / step));
+    for (let j = 0; j < k; j++) { X[m] = ax + ((bx - ax) * j) / k; Y[m] = ay + ((by - ay) * j) / k; m++; }
+  }
+  X[m] = path[(n - 1) * 2]; Y[m] = path[(n - 1) * 2 + 1]; m++;
+  const w = Math.max(1, Math.round(window / step));
+  const put = (cx: number, cy: number) => {
+    if (cx >= win.x0 && cx < win.x1 && cy >= win.y0 && cy < win.y1) plot(cx, cy);
+  };
+  for (let i = 0; i + 1 < m; i++) {
+    const i0 = Math.max(0, i - w), i1 = Math.min(m - 1, i + w);
+    const ax = Math.abs(X[i1] - X[i0]), ay = Math.abs(Y[i1] - Y[i0]);
+    if (ay <= ax * 1.25) {
+      const c0 = Math.floor(X[i] - 0.5), c1 = Math.floor(X[i + 1] - 0.5);
+      if (c0 !== c1) {
+        const cx = Math.max(c0, c1), t = (cx + 0.5 - X[i]) / (X[i + 1] - X[i]);
+        put(cx, Math.floor(Y[i] + t * (Y[i + 1] - Y[i])));
+      }
+    }
+    if (ax <= ay * 1.25) {
+      const r0 = Math.floor(Y[i] - 0.5), r1 = Math.floor(Y[i + 1] - 0.5);
+      if (r0 !== r1) {
+        const cy = Math.max(r0, r1), t = (cy + 0.5 - Y[i]) / (Y[i + 1] - Y[i]);
+        put(Math.floor(X[i] + t * (X[i + 1] - X[i])), cy);
+      }
+    }
+  }
+  put(Math.floor(X[0]), Math.floor(Y[0]));
+  put(Math.floor(X[m - 1]), Math.floor(Y[m - 1]));
+}

@@ -8,6 +8,8 @@
  * 色番号 0..3 の意味はパレットごとに main.c 側で決める。
  */
 
+import { RAIL_PAIRS } from "../server/rail";
+
 type Grid = number[][];
 
 function grid(fill = 0): Grid {
@@ -86,7 +88,7 @@ class PyRandom {
   }
 }
 
-// ---- BG (pal0: 緑, pal1: 茶/白, pal2: 灰, pal3: 青。割り当ては main.c の tile_pal) ----
+// ---- BG (pal0: 緑, pal1: 黄/赤, pal2: 黒/濃い灰/白, pal3: 青。割り当ては main.c の tile_pal) ----
 function grass(): Grid {
   const g = grid();
   for (const [x, y] of [[3, 2], [11, 5], [6, 9], [13, 12], [2, 13]]) {
@@ -115,34 +117,57 @@ function forest(): Grid {
   return g;
 }
 
-function mountain(): Grid {
-  const g = grid();
-  for (let r = 1; r < 15; r++) {
-    const hw = Math.trunc(r * 0.55) + 1;
-    for (let x = Math.max(0, 8 - hw); x < Math.min(16, 8 + hw); x++) {
-      let c = x < 8 ? 1 : 2;
-      if (r <= 3 || (r === 4 && x % 2 === 0) || (r === 5 && x % 4 === 0)) {
-        c = 3;
-      }
-      g[r][x] = c;
+/** 丘 1 つを描く。cx=中心、hw=半幅、h=高さ。縁は濃い緑、右側に斜めの陰影 (パレット 0: 1=濃い緑 2=薄い緑 3=茶)。 */
+function hill(g: Grid, cx: number, hw: number, h: number) {
+  for (let x = Math.max(0, cx - hw); x <= Math.min(15, cx + hw); x++) {
+    const t = (x - cx) / hw;
+    const top = 15 - Math.round(h * Math.sqrt(Math.max(0, 1 - t * t)));      // 半楕円の稜線
+    for (let y = top; y < 16; y++) {
+      let c = 2;
+      if (y === top) c = 1;                                                    // 稜線
+      else if (x > cx && y > top + 1 && (x + y) % 2 === 0) c = 1;              // 右側の陰
+      g[y][x] = c;
     }
   }
+}
+
+/** 山: なだらかな丘が 2 つ並ぶ。 */
+function mountain(): Grid {
+  const g = grid();
+  hill(g, 4, 8, 9);
+  hill(g, 12, 7, 6);
+  for (const [x, y] of [[3, 9], [5, 12], [11, 11], [13, 14], [2, 14]]) g[y][x] = 3;   // 土
   return g;
 }
 
-function rock(): Grid {
-  const rnd = new PyRandom(7);
-  const g = grid(2);
-  for (let k = 0; k < 14; k++) {
-    const x = rnd.randrange(16), y = rnd.randrange(16);
-    for (const [dx, dy] of [[0, 0], [1, 0], [1, 1]]) {
-      put(g, x + dx, y + dy, 1);
+/**
+ * 岩の峰 1 つ (パレット 2: 1=濃い灰 2=灰 3=白)。cx=中心、top=頂の行、slope=すそ野の広がり方。
+ * 左は明るい面、右は暗い面。縁はでこぼこ。snow=頂に白い雪、稜線は白。
+ */
+function crag(g: Grid, cx: number, top: number, slope: number, seed: number, snow: boolean) {
+  const rnd = new PyRandom(seed);
+  for (let r = top; r < 16; r++) {
+    const hw = Math.min(8, Math.round((r - top) * slope) + 1);
+    const jl = rnd.randrange(2), jr = rnd.randrange(2);
+    for (let x = Math.max(0, cx - hw + jl); x <= Math.min(15, cx + hw - jr); x++) {
+      let c = x < cx ? 2 : 1;
+      if (x < cx && (x + r) % 5 === 0) c = 3;                                   // 左 (明るい面) の白い粒
+      if (snow && r - top < 4 && x < cx && (x + r) % 3 !== 0) c = 3;
+      g[r][x] = c;
     }
+    if (r - top < 9) g[r][cx] = 3;                                              // 稜線
   }
-  for (let k = 0; k < 9; k++) {
-    const x = rnd.randrange(16), y = rnd.randrange(16);
-    put(g, x, y, 3);
+  for (let k = 0; k < 5; k++) {                                                 // 割れ目と岩肌
+    const x = cx - 4 + rnd.randrange(8), y = top + 4 + rnd.randrange(Math.max(1, 15 - top - 4));
+    if (y < 16 && x >= 0 && x < 16 && g[y][x] !== 0) g[y][x] = x < cx ? 1 : 2;
   }
+}
+
+/** 岩山: 高い峰と低い峰の 2 つ (パレット 2: 1=黒 2=濃い灰 3=白)。 */
+function rock(): Grid {
+  const g = grid();
+  crag(g, 4, 1, 0.6, 11, true);
+  crag(g, 11, 5, 0.55, 23, false);
   return g;
 }
 
@@ -156,95 +181,53 @@ function water(): Grid {
   return g;
 }
 
-function bridgeH(): Grid {
-  const g = water();
-  for (let x = 0; x < 16; x++) {
-    g[2][x] = 2;
-    g[13][x] = 2;
-    for (let y = 3; y < 13; y++) {
-      g[y][x] = x % 4 === 0 ? 1 : 3;
-    }
-  }
-  return g;
-}
-
-function roadH(): Grid {
-  const g = grid();
-  for (let x = 0; x < 16; x++) {
-    g[0][x] = g[15][x] = 2;
-    for (let y = 1; y < 15; y++) {
-      g[y][x] = 1;
-    }
-    if ([2, 3, 4, 5].includes(x % 8)) {
-      g[7][x] = g[8][x] = 3;
-    }
-  }
-  return g;
-}
-
-function roadX(): Grid {
-  const g = grid(1);
-  for (const [x, y] of [[0, 0], [14, 0], [0, 14], [14, 14]]) {
-    for (let dx = 0; dx < 2; dx++) {
-      for (let dy = 0; dy < 2; dy++) {
-        g[y + dy][x + dx] = 2;
-      }
-    }
-  }
-  return g;
-}
-
-// pal0=緑 (1 濃緑 2 薄緑 3 茶) / pal1=茶/白 (1 茶 2 濃茶 3 白) / pal2=灰 (1 濃灰 2 灰 3 白)
-function urban(): Grid {
+/** 道路 (パレット 2: 1=黒 2=濃い灰 3=白): 向きのない 1 種。濃い灰の舗装に、黒と白の粒だけ。 */
+function road(): Grid {
   const g = grid(2);
-  for (let i = 0; i < 16; i++) {
-    g[0][i] = g[8][i] = 1;
-    g[i][0] = g[i][8] = 1;
-  }
-  for (const [x, y] of [[3, 3], [11, 3], [3, 11], [11, 11]]) {
-    put(g, x, y, 3);
-  }
+  for (const [x, y] of [[2, 3], [9, 1], [13, 6], [5, 9], [11, 12], [1, 14], [7, 15], [14, 10]]) g[y][x] = 1;
+  for (const [x, y] of [[6, 5], [12, 14], [3, 11]]) g[y][x] = 3;
   return g;
 }
 
+const fill = (g: Grid, x0: number, y0: number, x1: number, y1: number, c: number) => {
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) g[y][x] = c;
+};
+
+/** 三角屋根の家を描く (x0..x1、屋根の頂 roofTop、壁の下端 wallBottom)。 */
+function roofHouse(g: Grid, x0: number, x1: number, roofTop: number, wallBottom: number, roof: number, wall: number, trim: number) {
+  const mid = (x0 + x1) / 2, rows = Math.ceil((x1 - x0) / 2) + 1;
+  for (let i = 0; i < rows; i++) {                                              // 三角屋根
+    const hw = Math.min((x1 - x0) / 2, 0.5 + i);
+    for (let x = Math.ceil(mid - hw); x <= Math.floor(mid + hw); x++) g[roofTop + i][x] = roof;
+  }
+  const wallTop = roofTop + rows;
+  fill(g, x0 + 1, wallTop, x1 - 1, wallBottom, wall);                           // 壁
+  g[wallTop - 1][x0] = roof; g[wallTop - 1][x1] = roof;                         // 軒
+  g[wallBottom - 1][Math.floor(mid)] = trim; g[wallBottom][Math.floor(mid)] = trim;   // 扉
+  g[wallTop + 1][x0 + 2 <= x1 - 2 ? x0 + 2 : x0 + 1] = trim;                    // 窓
+}
+
+/**
+ * 建物 (パレット 1: 0=緑 1=黄 2=淡い黄 3=赤): ビル 1 棟と、赤い三角屋根の家 1 軒。市街地も同じ絵。
+ * 背景は草と同じ緑。ビルは淡い黄の壁に黄色い窓と赤い屋上、家は赤い屋根と煙突。
+ */
 function building(): Grid {
-  const g = grid(1);
-  for (let y = 1; y < 15; y++) {
-    for (let x = 1; x < 15; x++) {
-      g[y][x] = y < 3 ? 3 : 2;
-    }
-  }
-  for (let y = 5; y < 14; y += 3) {
-    for (let x = 3; x < 13; x += 3) {
-      put(g, x, y, 1); put(g, x + 1, y, 1);
-    }
-  }
-  return g;
-}
-
-function sand(): Grid {
-  const g = grid(1);
-  for (const [x, y] of [[2, 2], [9, 1], [13, 5], [5, 7], [11, 10], [2, 12], [7, 14]]) {
-    put(g, x, y, 3); put(g, x + 1, y + 1, 2);
-  }
-  return g;
-}
-
-function snow(): Grid {
-  const g = grid(3);
-  for (const [x, y] of [[3, 3], [10, 2], [6, 8], [13, 11], [2, 13]]) {
-    put(g, x, y, 1); put(g, x + 1, y, 1);
-  }
-  return g;
-}
-
-function farm(): Grid {
   const g = grid(0);
-  for (let y = 0; y < 16; y++) {
-    for (let x = 0; x < 16; x++) {
-      if (y % 4 === 1) { g[y][x] = 2; }
-      else if (y % 4 === 2) { g[y][x] = 1; }
-    }
+  fill(g, 1, 2, 6, 14, 2); fill(g, 1, 1, 6, 2, 3);                              // ビル: 淡い黄の壁、赤い屋上
+  g[0][3] = 3; g[0][4] = 3;                                                     // アンテナ
+  for (const y of [4, 7, 10]) for (const x of [2, 5]) { g[y][x] = 1; g[y + 1][x] = 1; }   // 黄色い窓
+  fill(g, 3, 12, 4, 14, 3);                                                     // 入口
+  for (let y = 3; y < 15; y++) g[y][6] = 1;                                     // 右の陰 (黄)
+  roofHouse(g, 8, 14, 6, 14, 3, 2, 1);                                          // 家: 赤い屋根
+  g[4][13] = 3; g[5][13] = 3;                                                   // 煙突
+  return g;
+}
+
+/** 砂 (パレット 1: 1=黄 2=淡い黄 3=赤): 淡い黄色の地に、黄色い粒。 */
+function sand(): Grid {
+  const g = grid(2);
+  for (const [x, y] of [[2, 2], [9, 1], [13, 5], [5, 7], [11, 10], [2, 12], [7, 14], [14, 14], [6, 3]]) {
+    put(g, x, y, 1); put(g, x + 1, y + 1, 1);
   }
   return g;
 }
@@ -262,68 +245,69 @@ function wetland(): Grid {
   return g;
 }
 
-function railH(): Grid {
-  const g = grid(2);
-  for (let x = 0; x < 16; x++) {
-    for (let y = 2; y < 14; y++) {
-      if (x % 4 < 2) { g[y][x] = 1; }
-    }
-    g[5][x] = g[10][x] = 3;
-  }
-  return g;
+// ---- 線路: 方向 (0=E 1=SE 2=S 3=SW 4=W 5=NW 6=N 7=NE) のつながる 2 方向から描く ----
+const PT: [number, number][] = [[16, 8], [16, 16], [8, 16], [0, 16], [0, 8], [0, 0], [8, 0], [16, 0]];   // 各方向の辺・角の位置
+
+function segDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax, dy = by - ay;
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
-function railX(): Grid {
-  const g = railH();
-  const v = transpose(railH());
+/**
+ * 線路: 方向 a と b をつなぐ太さ 4 画素の線 (パレット 2: 1=黒 3=白)。桃太郎電鉄風に、白と黒が互い違い
+ * (横・縦は 4 画素ごと、斜めは (x±y) 8 ごと。タイルをまたいでも交互につながる)。地面は草と同じ緑。
+ */
+function railArt(a: number, b: number): Grid {
+  const g = grid(0);
   for (let y = 0; y < 16; y++) {
     for (let x = 0; x < 16; x++) {
-      if (v[y][x] === 3) { g[y][x] = 3; }
+      const px = x + 0.5, py = y + 0.5;
+      const da = segDist(px, py, PT[a][0], PT[a][1], 8, 8), db = segDist(px, py, PT[b][0], PT[b][1], 8, 8);
+      if (Math.min(da, db) > 2.0) continue;
+      const s = da <= db ? a : b;
+      let block: number;
+      if (s === 0 || s === 4) block = Math.floor(px / 4);
+      else if (s === 2 || s === 6) block = Math.floor(py / 4);
+      else if (s === 1 || s === 5) block = Math.floor((px + py) / 8);
+      else block = Math.floor((px - py + 16) / 8);
+      g[y][x] = block % 2 === 0 ? 3 : 1;
     }
   }
   return g;
 }
 
-function crossing(): Grid {
-  const g = roadH();
-  for (let y = 0; y < 16; y++) {
-    g[y][5] = g[y][10] = 3;
-  }
+/** 踏切 (線路が横に走り、道路が縦に横切る): 緑の地に灰色の道路 (縦)、その上を白黒の線路が横切る。 */
+function crossingH(): Grid {
+  const g = grid(0);
+  const r = road();
+  for (let y = 0; y < 16; y++) for (let x = 4; x <= 11; x++) g[y][x] = r[y][x];
+  for (let x = 0; x < 16; x++) for (let y = 6; y <= 9; y++) g[y][x] = (x >> 2) % 2 === 0 ? 3 : 1;
   return g;
 }
 
-function hwyH(): Grid {
-  const g = grid(1);
-  for (let x = 0; x < 16; x++) {
-    g[0][x] = g[15][x] = 3;
-    g[1][x] = g[14][x] = 2;
-    g[7][x] = g[8][x] = 2;
-    if (x % 4 < 2) { g[3][x] = g[12][x] = 3; }
-  }
-  return g;
-}
-
-function hwyX(): Grid {
-  const g = grid(1);
-  for (const [x, y] of [[0, 0], [14, 0], [0, 14], [14, 14]]) {
-    for (let dx = 0; dx < 2; dx++) {
-      for (let dy = 0; dy < 2; dy++) {
-        g[y + dy][x + dx] = 3;
-      }
-    }
-  }
-  for (let i = 2; i < 14; i++) {
-    g[7][i] = g[8][i] = g[i][7] = g[i][8] = 2;
-  }
+/**
+ * 駅 (パレット 2: 0=緑 1=黒 3=白): 黒い円盤に白い電車の正面 (参照: icooon-mono の「駅」の題材)。
+ * 1 つの駅に 1 マスだけ置く。市街地 (赤・黄) とは違う黒白。
+ */
+function station(): Grid {
+  const g = grid(0);
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) if (Math.hypot(x + 0.5 - 8, y + 0.5 - 8) < 7.8) g[y][x] = 1;
+  for (let y = 3; y <= 10; y++) for (let x = 4; x <= 11; x++) if (!(y === 3 && (x === 4 || x === 11))) g[y][x] = 3;   // 車体
+  for (let x = 6; x <= 9; x++) g[4][x] = 1;                                                                        // 行き先表示
+  for (let y = 5; y <= 7; y++) for (const x of [5, 6, 9, 10]) g[y][x] = 1;                                         // 窓
+  g[9][5] = g[9][10] = 1;                                                                                          // ライト
+  for (let i = 0; i < 3; i++) { g[11 + i][6 - i] = 3; g[11 + i][9 + i] = 3; }                                      // レール
   return g;
 }
 
 // 並び順は src/terrain.h の T_* と一致させる
 const BG = [grass(), forest(), mountain(), rock(), water(),
-  bridgeH(), transpose(bridgeH()), roadH(), transpose(roadH()), roadX(),
-  urban(), building(), sand(), snow(), farm(), wetland(),
-  railH(), transpose(railH()), railX(), crossing(),
-  hwyH(), transpose(hwyH()), hwyX()];
+  building(), sand(), wetland(),
+  road(),
+  ...RAIL_PAIRS.map(([a, b]) => railArt(a, b)),              // 線路 20 種 (server/rail.ts の並び)
+  crossingH(), transpose(crossingH()),
+  station()];
 
 // ---- プレイヤー (上半身 pal0: 1=髪 2=肌 3=赤キャップ / 下半身 pal1: 1=白 2=ジーンズ 3=肌) ----
 const LEGS_STAND = ["0000022222200000", "0000022222200000", "0000022002200000", "0000011001100000"];
