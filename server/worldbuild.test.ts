@@ -14,7 +14,7 @@ import * as T from "./terrain";
 import {
   cellToLonLat, cellToMeters, elevationToRgb, encodePng, writePbf, writeShp, type TNode, type TWay,
 } from "./testutil";
-import { BLOCK_M, CELL_M, MERC, Painter, blockRange, lonLatToBlock, slopeLevel, slopeLevels, stationMarkers } from "./worldbuild";
+import { BLOCK_M, CELL_M, MERC, Painter, blockRange, lonLatToBlock, slopeLevel, slopeLevels, stationMarkers, thinMask } from "./worldbuild";
 import { BLOCK_SIZE, classId, createDb, writeBlock } from "./worlddb";
 
 let dir: string;
@@ -198,6 +198,64 @@ describe("細い線 (線路用の 8 連結)", () => {
   test("折れ線の継ぎ目や、窓の外は塗らない", () => {
     const c = cellsOf([140.5, 10.5, 160.5, 10.5]);               // 窓は x < 150
     expect(Math.max(...[...c].map((k) => Number(k.split(",")[0])))).toBe(149);
+  });
+});
+
+describe("細線化 (複線を 1 本の鎖にする)", () => {
+  const S = 40;
+  const maskOf = (cells: [number, number][]) => { const m = new Uint8Array(S * S); for (const [x, y] of cells) m[y * S + x] = 1; return m; };
+  const cellsOfMask = (m: Uint8Array) => { const out: [number, number][] = []; m.forEach((v, i) => { if (v) out.push([i % S, (i / S) | 0]); }); return out; };
+  const connectionCounts = (m: Uint8Array) => {
+    const has = (x: number, y: number) => x >= 0 && y >= 0 && x < S && y < S && m[y * S + x] === 1;
+    return cellsOfMask(m).map(([x, y]) => railConnections((dx, dy) => has(x + dx, y + dy)).length);
+  };
+  const components = (m: Uint8Array) => {
+    const cells = cellsOfMask(m), key = (x: number, y: number) => `${x},${y}`, set = new Set(cells.map(([x, y]) => key(x, y))), seen = new Set<string>();
+    let n = 0;
+    for (const [sx, sy] of cells) {
+      if (seen.has(key(sx, sy))) continue;
+      n++; const stack: [number, number][] = [[sx, sy]]; seen.add(key(sx, sy));
+      while (stack.length) { const [x, y] = stack.pop()!; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const k = key(x + dx, y + dy); if (set.has(k) && !seen.has(k)) { seen.add(k); stack.push([x + dx, y + dy]); } } }
+    }
+    return n;
+  };
+
+  test("並走する 2 本の斜めの鎖は、1 本の鎖になる (どのマスも、つながる方向が 2 以下)", () => {
+    const cells: [number, number][] = [];
+    for (let i = 5; i < 30; i++) for (let k = 0; k < 4; k++) cells.push([i + k, i]);          // 隣り合う並走線 (実データの「#44#」の並び)
+    const m = maskOf(cells);
+    expect(Math.max(...connectionCounts(m))).toBeGreaterThan(2);                              // 細線化の前は、分岐に見える
+    thinMask(m, S);
+    expect(Math.max(...connectionCounts(m))).toBeLessThanOrEqual(2);
+    expect(components(m)).toBe(1);
+    expect(cellsOfMask(m).length).toBeGreaterThanOrEqual(22);                                 // 長さはほぼ保たれる
+    expect(cellsOfMask(m).length).toBeLessThan(40);                                           // 帯 (100 マス) は 1 本の鎖になる
+  });
+
+  test("太い帯 (ホームの塗りつぶし) は中心線になる。つながりは保たれる", () => {
+    const cells: [number, number][] = [];
+    for (let x = 5; x < 35; x++) for (let y = 17; y <= 21; y++) cells.push([x, y]);          // 30 x 5 の帯
+    const m = maskOf(cells);
+    thinMask(m, S);
+    expect(components(m)).toBe(1);
+    expect(cellsOfMask(m).length).toBeLessThan(45);
+    expect(Math.max(...connectionCounts(m))).toBeLessThanOrEqual(2);
+  });
+
+  test("1 マス幅の線と、本当の T 字の分岐は、そのまま残る", () => {
+    const cells: [number, number][] = [];
+    for (let x = 5; x < 35; x++) cells.push([x, 20]);                                         // 横の直線
+    for (let y = 21; y < 35; y++) cells.push([20, y]);                                        // 下へ分かれる枝
+    for (let i = 0; i < 10; i++) cells.push([6 + i, 19 - i]);                                  // 斜めの枝
+    const m = maskOf(cells), before = cellsOfMask(m).length;
+    expect(thinMask(m, S)).toBe(0);
+    expect(cellsOfMask(m).length).toBe(before);
+    expect(connectionCounts(m).filter((n) => n > 2).length).toBeGreaterThan(0);               // 分岐点は残る
+  });
+
+  test("端の 1 マスは触らず、孤立したマスも消えない", () => {
+    const m = maskOf([[10, 10], [20, 20], [21, 20]]);
+    expect(thinMask(m, S)).toBe(0);
   });
 });
 
@@ -472,9 +530,11 @@ describe("ビルド全体 (合成データ → world.sqlite → OsmSource)", () 
 
   test("駅は 1 つの駅に 1 マスだけ。駅舎のほかのマスは線路", () => {
     expect(c(202, 222)).toBe(T.T_STATION);           // 駅舎の重心
-    expect(c(200, 220)).toBe(railTile(0, 2));        // 駅舎のほかのマスは線路 (隣の線路で向きが決まる)
-    expect(c(203, 223)).toBe(railTile(4, 6));
-    expect(c(201, 221)).toBe(railTile(0, 4));        // 内側は、まっすぐな横
+    // 駅舎 (4x4 マス) のほかのマスは線路になるが、幅のある塊は細線化で 1 本の線になる
+    let rails = 0;
+    for (let y = 218; y < 226; y++) for (let x = 198; x < 206; x++) if (c(x, y) >= T.T_RAIL && c(x, y) < T.T_RAIL + T.N_RAIL) rails++;
+    expect(rails).toBeGreaterThanOrEqual(1);
+    expect(rails).toBeLessThan(16);
     expect(c(150, 100)).toBe(T.T_STATION);           // 点だけの駅
     expect(c(195, 215)).not.toBe(T.T_STATION);       // 敷地 (public_transport) は線路にしない
     expect(c(195, 215)).not.toBe(railTile(0, 4));

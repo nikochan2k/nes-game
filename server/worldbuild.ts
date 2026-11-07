@@ -56,6 +56,47 @@ export function slopeLevels(elev: Float32Array, w: number, h: number, ymax: numb
   return out;
 }
 
+// ---- 細線化 ----
+/**
+ * 2 値のマス (mask、1 辺 stride、1 = 線路) を、Guo–Hall 法で 1 マス幅の中心線にする。
+ * 隣り合う線路 (複線) や、駅のホームの塗りつぶしのように幅のある所が、1 本の鎖にまとまる。
+ * つながり (8 連結) と端点は保たれ、本当の分岐点だけが残る。端 (最も外側の 1 マス) は触らない。
+ * Zhang–Suen 法は、幅 2 の斜めの帯を丸ごと消してしまうので使わない。
+ * 各回の判定は、周囲 8 マスだけで決まる (走査の順序によらない) ので、タイルの境目でも結果が食い違いにくい。
+ * mask をその場で書き換え、消したマスの数を返す。
+ */
+export function thinMask(mask: Uint8Array, stride: number): number {
+  let list: number[] = [];
+  for (let i = 0; i < mask.length; i++) if (mask[i]) list.push(i);
+  const s = stride;
+  let removed = 0, changed = true;
+  while (changed) {
+    changed = false;
+    for (let step = 0; step < 2; step++) {
+      const del: number[] = [];
+      for (const i of list) {
+        const x = i % s, y = (i / s) | 0;
+        if (x < 1 || y < 1 || x >= s - 1 || y >= s - 1) continue;
+        // 北から時計回り: P2=N P3=NE P4=E P5=SE P6=S P7=SW P8=W P9=NW
+        const p2 = mask[i - s], p3 = mask[i - s + 1], p4 = mask[i + 1], p5 = mask[i + s + 1];
+        const p6 = mask[i + s], p7 = mask[i + s - 1], p8 = mask[i - 1], p9 = mask[i - s - 1];
+        const c = (!p2 && (p3 || p4) ? 1 : 0) + (!p4 && (p5 || p6) ? 1 : 0) + (!p6 && (p7 || p8) ? 1 : 0) + (!p8 && (p9 || p2) ? 1 : 0);
+        if (c !== 1) continue;                                       // 消すと切れる、または端
+        const n1 = (p9 | p2) + (p3 | p4) + (p5 | p6) + (p7 | p8);
+        const n2 = (p2 | p3) + (p4 | p5) + (p6 | p7) + (p8 | p9);
+        const n = Math.min(n1, n2);
+        if (n < 2 || n > 3) continue;
+        const blocked = step === 0 ? ((p2 | p3 | (p5 ? 0 : 1)) & p4) : ((p6 | p7 | (p9 ? 0 : 1)) & p8);
+        if (blocked !== 0) continue;
+        del.push(i);
+      }
+      for (const i of del) mask[i] = 0;
+      if (del.length > 0) { changed = true; removed += del.length; list = list.filter((i) => mask[i]); }
+    }
+  }
+  return removed;
+}
+
 // ---- 塗る ----
 const GRASS = classId("natural", "grass"), SEA = classId("sea", "sea"), WATER = classId("natural", "water");
 const BUILDING = classId("building", "yes"), URBAN = classId("landuse", "residential");
@@ -121,6 +162,8 @@ export function stationMarkers(store: FeatureStore, nodes: [number, number][] = 
 }
 /** 建物からこのマス数以内の「何もない陸」は草ではなく市街地にする (OSM は建物の隙間や庭を塗っていないため) */
 export const URBAN_RADIUS = 3;
+/** 作業台の余白 (マス)。市街地の判定 (URBAN_RADIUS) と、線路の細線化がタイルの境目で途切れないようにする */
+export const PAINT_MARGIN = 8;
 const LAND = 64;                                  // 作業用: byte3 の bit6 = 陸地ポリゴンの内側
 const waterRank = CLASSES[WATER - 1].rank;
 const rankOf = (id: number) => CLASSES[id - 1]?.rank ?? 0;
@@ -140,7 +183,7 @@ export class Painter {
   readonly cells: Uint8Array;
   private win: Window = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
-  constructor(readonly n: number, readonly margin = URBAN_RADIUS) {
+  constructor(readonly n: number, readonly margin = PAINT_MARGIN) {
     this.w = n * BLOCK_SIZE;
     this.stride = this.w + 2 * margin;
     this.cells = new Uint8Array(this.stride * this.stride * 4);
@@ -194,12 +237,23 @@ export class Painter {
     for (const [sx, sy] of stations) {                // 駅のマス (1 つの駅に 1 つ)
       if (sx >= win.x0 && sx < win.x1 && sy >= win.y0 && sy < win.y1) cells[at(sx, sy)] = STATION_CELL;
     }
+    this.thinRails();
     this.urbanize();
+  }
+
+  /** 線路のマスを 1 マス幅の中心線にする (複線やホームの塗りつぶしを 1 本の鎖にまとめる)。 */
+  private thinRails(): void {
+    const { stride: s, cells } = this;
+    const mask = new Uint8Array(s * s);
+    for (let i = 0; i < mask.length; i++) mask[i] = cells[i * 4 + 2] !== 0 ? 1 : 0;
+    thinMask(mask, s);
+    for (let i = 0; i < mask.length; i++) if (!mask[i]) cells[i * 4 + 2] = 0;
   }
 
   /** 建物から URBAN_RADIUS マス以内で、面が何も塗られていない陸のマスを市街地にする。 */
   private urbanize(): void {
-    const { stride: s, cells, margin: r } = this;
+    const { stride: s, cells } = this;
+    const r = URBAN_RADIUS;
     const n = s * s;
     const near = new Uint8Array(n);                // 横方向に r マス以内に建物がある
     for (let y = 0; y < s; y++) {
