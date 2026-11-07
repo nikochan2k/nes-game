@@ -66,6 +66,18 @@ Mesen は `/Applications` または `~/Applications` から探す。
 2. `make server` でサーバーを起動する。
 3. 別ターミナルで `make bridge` を実行する。`mesen/bridge.lua` がシリアルを TCP に中継する。
 
+### 起動位置を変える
+
+ROM の起動位置は、`data/start.json` (`data/` は `.gitignore` なのでコミットされない) に緯度経度で書く。
+`make` がこれから `build/start.h` を作って ROM に埋め込む。ファイルがなければ東京 (z=10)。
+
+```json
+{ "lat": 35.6812, "lon": 139.7671, "z": 14 }
+```
+
+`z` は省略できる (既定 10、1〜18)。書き換えたら `make` (または `make bridge`) で ROM が作り直される。
+ひな形は `cfg/start.example.json`。
+
 `make test` でサーバーのテストを実行する。`data/world.sqlite` (形式は `server/worlddb.ts`、
 `doc/tile-conversion-plan.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
 `server/mapserver.ts` のノイズで作った仮の世界を返す。`--db` でファイルを指定できる。

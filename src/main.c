@@ -63,9 +63,7 @@ typedef unsigned long u32;
 
 #define Z_MIN 1                /* 1 辺は 2^(z+4) マス。z=1 でも 32 マスあり、輪より狭くならない */
 #define Z_MAX 18               /* OSM 由来のマスは z18 (約 8m) まで。座標は 24bit のまま */
-#define START_Z 10
-#define START_X 14549UL        /* 東京 (経度 139.69 / 緯度 35.69) の z=10 でのマス座標 */
-#define START_Y 6451UL
+#include "start.h"            /* START_Z / START_X / START_Y。build/start.h (gfx/gen_start.ts が data/start.json から生成) */
 
 static u32 cx, cy;             /* 現在のマス (世界全体での座標) */
 static u32 world_mask;         /* (1 << (z + 4)) - 1 */

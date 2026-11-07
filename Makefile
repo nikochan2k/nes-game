@@ -4,6 +4,7 @@
 #   make server   run the map server (Raspberry Pi 側と同じもの)
 #   make bridge   open in Mesen with the serial bridge script (要 make server)
 #   make test     run the map server tests
+#   起動位置: data/start.json (gitignore) に {"lat":..,"lon":..,"z":..} を書く。無ければ東京 (cfg/start.example.json 参照)
 #   make doctor   check recommended tools
 
 CL65     ?= cl65
@@ -14,6 +15,8 @@ SRC      := src/crt0.s src/ppu.s src/main.c src/link.c src/worldgen.c src/chr.s
 CFG      := cfg/field.cfg
 CHR      := gfx/tiles.chr
 ROM      := build/field.nes
+START_CFG := data/start.json
+START_H  := build/start.h
 DBG      := build/field.dbg
 
 MESEN_APP := $(firstword $(wildcard \
@@ -28,16 +31,23 @@ FAMISTUDIO_APP := $(firstword $(wildcard \
 	$(HOME)/Applications/FamiStudio.app \
 ))
 
-.PHONY: all clean run bridge server test doctor
+.PHONY: all clean run bridge server test doctor FORCE
 
 all: $(ROM)
 
 $(CHR): gfx/gen_chr.ts
 	$(BUN) gfx/gen_chr.ts $@
 
-$(ROM): $(SRC) $(wildcard src/*.h) $(CFG) $(CHR)
+# 起動位置のヘッダ。data/start.json が増減・変更されたら変わる (内容が同じなら書き換えないので ROM は再ビルドされない)
+$(START_H): FORCE
 	@mkdir -p build
-	$(CL65) -t none -O -g -C $(CFG) --obj-path build \
+	@$(BUN) gfx/gen_start.ts $(START_CFG) $@
+
+FORCE:
+
+$(ROM): $(SRC) $(wildcard src/*.h) $(CFG) $(CHR) $(START_H)
+	@mkdir -p build
+	$(CL65) -t none -O -g -C $(CFG) -I build --obj-path build \
 		-Wl --dbgfile,$(DBG) \
 		-o $@ $(SRC)
 	@echo "Built $@ ($(DBG))"
