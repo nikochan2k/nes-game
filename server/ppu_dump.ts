@@ -4,9 +4,10 @@
  * (src/main.c の tile_pal) と合っているか集計する。
  *   bun server/ppu_dump.ts      (待ち受け。Mesen のスクリプトウィンドウで dump_ppu.lua を実行する)
  */
-const TILE_PAL = [0, 0, 1, 2, 3, 3, 3, 2, 2, 2, 2, 2, 1, 1, 0, 0, 2, 2, 2, 2, 2, 2, 2];
-const NAMES = ["草", "森", "山", "岩", "水", "橋H", "橋V", "道H", "道V", "道X", "街", "建", "砂", "雪", "畑", "湿",
-  "線H", "線V", "線X", "踏", "高H", "高V", "高X"];
+import { loadRomTables, terrainName } from "./romtables";
+
+const { tilePal: TILE_PAL } = loadRomTables();        // 期待値は src/main.c から読む (地形を足しても食い違わない)
+const NAMES = TILE_PAL.map((_, id) => terrainName(id));
 
 function analyze(text: string) {
   const m: Record<string, number[]> = {};
@@ -27,7 +28,7 @@ function analyze(text: string) {
       const tile = m["NT" + nt]?.[ly * 2 * 32 + lx * 2];
       if (tile === undefined) continue;
       const id = tile >> 2;
-      if (id > 22 || tile & 3) continue;                 // 描かれていないマス
+      if (id >= TILE_PAL.length || tile & 3) continue;       // 描かれていないマス
       const ab = (ly >> 1) * 8 + (lx >> 1), sh = ((ly & 1) << 2) | ((lx & 1) << 1);
       const got = (m["ATTR" + nt][ab] >> sh) & 3;
       total++;

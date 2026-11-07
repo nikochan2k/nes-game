@@ -417,7 +417,8 @@ ID は `src/terrain.h`、`server/terrain.ts`、`gfx/gen_chr.ts` の並びで一�
 
 - **画面の色が化ける**: Mesen で歩くと、同じ地形の絵が、マスごとに違うパレットで表示される。地形 ID とタイルの形は正しい。
   ROM の属性テーブルの計算ロジックは、実座標で再現して期待と一致した。実機の PPU の状態を調べる診断ツール
-  (`mesen/dump_ppu.lua`、`server/ppu_dump.ts`)を用意したが、ダンプ待ちで原因は未特定。
+  (`mesen/dump_ppu.lua`、`server/ppu_dump.ts`、`server/shot_palette.ts`)を用意したが、ダンプ待ちで原因は未特定。
+  再発したときの手順・候補・これまでに確認したことは、`doc/memo-palette-glitch.md` にまとめた。地形を作り直した後も起きるかは未確認。
 - 実機(Mesen)での表示と、パレット(赤・黄)の色味は、私の環境からは確認できていない(スクリーンショット不可)。
 
 ### 制約
@@ -455,7 +456,8 @@ ID は `src/terrain.h`、`server/terrain.ts`、`gfx/gen_chr.ts` の並びで一�
 | `server/rasterize.ts`、`worldbuild.ts` | 塗り(面・線・細い線)、`Painter`、細線化、駅のマス |
 | `server/dem.ts`、`shapefile.ts` | 標高タイル、陸地ポリゴン(任意) |
 | `server/download.ts` | 入力データの取得 |
-| `server/ppu_dump.ts`、`mesen/dump_ppu.lua` | 診断(PPU の状態のダンプと集計) |
+| `server/preview.ts`、`server/png.ts` | 見栄えの確認ページ(ブラウザ。航空写真と地図の並置、タイル一覧)。手順は `doc/process-visual-review.md` |
+| `server/ppu_dump.ts`、`mesen/dump_ppu.lua`、`server/shot_palette.ts`、`server/romtables.ts` | 診断(PPU の状態のダンプと集計、スクリーンショットのパレット集計、ROM の表の読み込み)。手順は `doc/memo-palette-glitch.md` |
 | `src/`、`gfx/`、`cfg/` | ROM(C・アセンブリ)、絵と CHR の生成、起動位置 |
 | `mesen/bridge.lua` | Mesen のシリアルを TCP のサーバーにつなぐ |
 
@@ -464,6 +466,7 @@ ID は `src/terrain.h`、`server/terrain.ts`、`gfx/gen_chr.ts` の並びで一�
 ```
 make                 ROM をビルド (build/field.nes。絵は gfx/gen_chr.ts、起動位置は gfx/gen_start.ts)
 make test            サーバーのテスト (bun test server)
+make preview         見栄えの確認ページ (data/compare/preview.html)。地図の生成・反映の前に必ず見る
 make server          地図サーバーを起動 (data/world.sqlite があれば実データ)
 make bridge          Mesen でブリッジスクリプトつきで起動 (要 make server)
 bun server/download.ts all kanto --bbox 138.4,34.8,140.9,37.1
@@ -475,12 +478,17 @@ bun server/build_world.ts build --bbox 138.4,34.8,140.9,37.1 --pbf data/osm/kant
 - **起動位置**: `data/start.json` に `{ "lat": 35.6812, "lon": 139.7671, "z": 14 }` を書く(`z` は省略可で既定 10、1〜18)。
   `data/` は `.gitignore` なので、自宅などの座標はコミットされない。ひな形は `cfg/start.example.json`。
 
-### テスト(`bun test server`。71 件)
+### 見栄えの確認(必須の手順)
+
+地図の見え方が変わる変更は、地図の生成や ROM・サーバーへの反映の前に、ブラウザで見栄えを確認し、ユーザーの承認を得てから反映する。
+手順・基準地点・チェックリストは `doc/process-visual-review.md`、作業ルールは `CLAUDE.md`。
+
+### テスト(`bun test server`。73 件)
 
 - `osmsource.test.ts`: 合成した DB で、道路・線路(8 方向)・踏切・駅・面・傾斜・集約(z17 以下、z10 以下)を確認。
 - `worldbuild.test.ts`: 座標、ラスタライズ(面・線・細い線の連結性)、PBF の読み書き(タグつきノードを含む)、
   海岸線から陸、細線化、駅のマスの位置、DEM の傾斜、合成データから `world.sqlite` を作って `OsmSource` で読む通しテスト。
-- `mapserver.test.ts`、`start.test.ts`: 要求のデコード、TCP、起動位置の変換。
+- `mapserver.test.ts`、`start.test.ts`、`preview.test.ts`: 要求のデコード、TCP、起動位置の変換、確認用の PNG・タイルシート。
 
 ## 15. 付録: 設計判断の記録
 

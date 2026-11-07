@@ -4,6 +4,7 @@
 #   make server   run the map server (Raspberry Pi 側と同じもの)
 #   make bridge   open in Mesen with the serial bridge script (要 make server)
 #   make test     run the map server tests
+#   make preview  見栄えの確認ページ (ブラウザ)。地図の生成・ROM への反映の前に必ず見る
 #   起動位置: data/start.json (gitignore) に {"lat":..,"lon":..,"z":..} を書く。無ければ東京 (cfg/start.example.json 参照)
 #   make doctor   check recommended tools
 
@@ -31,7 +32,7 @@ FAMISTUDIO_APP := $(firstword $(wildcard \
 	$(HOME)/Applications/FamiStudio.app \
 ))
 
-.PHONY: all clean run bridge server test doctor FORCE
+.PHONY: all clean run bridge server test preview doctor FORCE
 
 all: $(ROM)
 
@@ -72,6 +73,10 @@ server:
 
 test:
 	$(BUN) test server
+
+# 見栄えの確認ページ (data/compare/preview.html)。地図の生成・反映の前に見る (doc/process-visual-review.md)
+preview:
+	$(BUN) server/preview.ts --open
 
 clean:
 	rm -rf build

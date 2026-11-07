@@ -78,7 +78,8 @@ ROM の起動位置は、`data/start.json` (`data/` は `.gitignore` なので�
 `z` は省略できる (既定 10、1〜18)。書き換えたら `make` (または `make bridge`) で ROM が作り直される。
 ひな形は `cfg/start.example.json`。
 
-`make test` でサーバーのテストを実行する。`data/world.sqlite` (形式は `server/worlddb.ts`、
+`make test` でサーバーのテストを実行する。`make preview` は、見栄えの確認ページ (航空写真と地図の並置、タイル一覧) を作ってブラウザで開く
+(地図の見え方が変わる変更は、生成・反映の前に必ずこれで確認する。手順は `doc/process-visual-review.md`)。`data/world.sqlite` (形式は `server/worlddb.ts`、
 `doc/map-spec.md` の 5 章) があれば実際の地図 (`server/osmsource.ts`)、なければ
 `server/mapserver.ts` のノイズで作った仮の世界を返す。`--db` でファイルを指定できる。
 
