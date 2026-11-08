@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { parseStart } from "../gfx/gen_start";
+import { DEFAULT_SPOTS, parseSpots, startSpot, type Spot } from "./spots";
 import { OsmSource } from "./osmsource";
 import { lonToX, latToY } from "./osmfeatures";
 import { encodePng } from "./png";
@@ -73,29 +73,6 @@ async function fetchPhoto(z: number, x: number, y: number, path: string): Promis
 }
 
 // ---- 地点 ----
-interface Spot { name: string; lat: number; lon: number }
-const DEFAULT_SPOTS: Spot[] = [
-  { name: "東京駅", lat: 35.6812, lon: 139.7671 }, { name: "豊洲 (海岸)", lat: 35.649, lon: 139.795 },
-  { name: "奥多摩 (山)", lat: 35.85, lon: 138.95 }, { name: "房総南端 (海岸と森)", lat: 34.92, lon: 139.85 },
-  { name: "熊谷 (平野)", lat: 36.15, lon: 139.39 }, { name: "筑波山", lat: 36.22, lon: 140.1 },
-];
-
-function parseSpots(s: string): Spot[] {
-  return s.split(";").filter(Boolean).map((p) => {
-    const [name, ll] = p.includes(":") ? p.split(":") : [p, p];
-    const [lat, lon] = ll.split(",").map(Number);
-    if (Number.isNaN(lat) || Number.isNaN(lon)) throw new Error(`地点は "名前:緯度,経度": ${p}`);
-    return { name, lat, lon };
-  });
-}
-
-function startSpot(): Spot | null {
-  const f = "data/start.json";
-  if (!existsSync(f)) return null;
-  const s = parseStart(readFileSync(f, "utf8"));
-  return { name: "起動位置 (data/start.json)", lat: s.lat, lon: s.lon };
-}
-
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 async function main() {
@@ -127,15 +104,17 @@ async function main() {
       mapImage(before, 17, tx, ty, 1, 2, join(out, `spot${i}_before17.png`));
       mapImage(before, 18, tx * 2, ty * 2, 2, 1, join(out, `spot${i}_before18.png`));
     }
-    let photo = !values["no-photo"] && await fetchPhoto(17, tx, ty, join(out, `spot${i}_photo17.jpg`));
+    // 写真のファイル名は、座標で決める (地点の並びが変わっても、別の地点の古い写真を使わない)
+    const f17 = `photo_17_${tx}_${ty}.jpg`;
+    let photo = !values["no-photo"] && await fetchPhoto(17, tx, ty, join(out, f17));
     const p18: string[] = [];
     for (const [dy, dx] of [[0, 0], [0, 1], [1, 0], [1, 1]]) {
-      const f = `spot${i}_photo18_${dy}${dx}.jpg`;
+      const f = `photo_18_${tx * 2 + dx}_${ty * 2 + dy}.jpg`;
       if (!values["no-photo"] && await fetchPhoto(18, tx * 2 + dx, ty * 2 + dy, join(out, f))) p18.push(f); else photo = false;
     }
     const fig = (cap: string, img: string, cls = "") => `<figure class="${cls}"><figcaption>${cap}</figcaption><img src="${img}"></figure>`;
     body += `<h2>${i + 1}. ${esc(sp.name)} <small>(緯度 ${sp.lat} / 経度 ${sp.lon}。z17 のタイル ${tx}, ${ty})</small></h2>
-<div class="row">${photo ? fig("航空写真 z17", `spot${i}_photo17.jpg`) : ""}${fig("地図 z17" + (before ? " (変更後)" : ""), `spot${i}_map17.png`)}${before ? fig("地図 z17 (変更前)", `spot${i}_before17.png`) : ""}</div>
+<div class="row">${photo ? fig("航空写真 z17", f17) : ""}${fig("地図 z17" + (before ? " (変更後)" : ""), `spot${i}_map17.png`)}${before ? fig("地図 z17 (変更前)", `spot${i}_before17.png`) : ""}</div>
 <div class="row">${p18.length === 4 ? `<figure><figcaption>航空写真 z18</figcaption><div class="grid"><img src="${p18[0]}"><img src="${p18[1]}"><img src="${p18[2]}"><img src="${p18[3]}"></div></figure>` : ""}${fig("地図 z18" + (before ? " (変更後)" : ""), `spot${i}_map18.png`)}${before ? fig("地図 z18 (変更前)", `spot${i}_before18.png`) : ""}</div>\n`;
   }
   const legend = tilePal.map((p, id) => `${id}:${terrainName(id)}(pal${p})`).join(" / ");

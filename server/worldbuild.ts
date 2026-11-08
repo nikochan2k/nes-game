@@ -2,10 +2,11 @@
  * world.sqlite を作る事前ビルドの中心部 (doc/map-spec.md の 6 章)。
  * 地物 (osmfeatures.ts) を z18 のマスに塗って (rasterize.ts)、ブロックにまとめる。
  */
+import { roadMin, railMin } from "./osmsource";
 import { fillRings, linePath, linePathThin, type Window } from "./rasterize";
-import { FL_BRIDGE, FL_CLIFF, FL_HWY, FL_RIVER, type FeatureStore } from "./osmfeatures";
+import { FL_CLIFF, FL_HWY, FL_PRIO_SHIFT, FL_RIVER, type FeatureStore } from "./osmfeatures";
 import {
-  B3_BRIDGE, B3_CLIFF, B3_HWY, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
+  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, B3_ROAD_UNDER, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
 } from "./worlddb";
 
 // ---- 座標 (EPSG:3857) ----
@@ -97,6 +98,87 @@ export function thinMask(mask: Uint8Array, stride: number): number {
   return removed;
 }
 
+/**
+ * 2 値のマス (mask、1 辺 stride、1 = 線) のうち、線に囲まれた小さな穴 (背景の 4 連結成分で、端に触れず、面積が maxArea 以下) を埋める。
+ * 線の細線化の前に使うと、小さな輪 (駐車場の通路、小さなロータリー、並走する線の隙間) が 1 本の線にまとまる。
+ * 埋めたマスの数を返す。
+ */
+export function fillSmallHoles(mask: Uint8Array, stride: number, maxArea: number): number {
+  const s = stride, n = s * s, seen = new Uint8Array(n);
+  let filled = 0;
+  const stack: number[] = [];
+  for (let start = 0; start < n; start++) {
+    if (mask[start] || seen[start]) continue;
+    const comp: number[] = [];
+    let touches = false;
+    stack.push(start); seen[start] = 1;
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      comp.push(i);
+      const x = i % s, y = (i / s) | 0;
+      if (x === 0 || y === 0 || x === s - 1 || y === s - 1) { touches = true; continue; }
+      for (const j of [i - 1, i + 1, i - s, i + s]) if (!mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+    }
+    if (!touches && comp.length <= maxArea) { for (const i of comp) mask[i] = 1; filled += comp.length; }
+  }
+  return filled;
+}
+
+/**
+ * 8 連結の線 (斜めにつながる所) を、4 連結 (上下左右だけでつながる) にする。斜めに隣り合う 2 マスの間に、角のマスを 1 つ足す
+ * (斜めの線が、└┐ の階段になる)。端 (最も外側の 1 マス) は触らない。足したマスの数を返す。
+ */
+export function stairify(mask: Uint8Array, stride: number): number {
+  const s = stride, add: number[] = [];
+  for (let y = 1; y < s - 1; y++) {
+    for (let x = 1; x < s - 1; x++) {
+      const i = y * s + x;
+      if (!mask[i]) continue;
+      for (const dx of [1, -1]) {
+        if (mask[i + s + dx] && !mask[i + dx] && !mask[i + s]) add.push(i + dx);
+      }
+    }
+  }
+  for (const i of add) mask[i] = 1;
+  return add.length;
+}
+
+/**
+ * 2 値のマスを、半径 r マス (円) だけ太らせる。近くに並走する線 (間が 2r マス以下) を、細線化の前につなげるために使う。
+ * 新しい 2 値のマスを返す (元は変えない)。
+ */
+export function dilate(mask: Uint8Array, stride: number, r: number): Uint8Array {
+  const s = stride, out = new Uint8Array(mask.length), r2 = r * r + r * 0.5;
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    const x = i % s, y = (i / s) | 0;
+    for (let dy = -r; dy <= r; dy++) {
+      const yy = y + dy;
+      if (yy < 0 || yy >= s) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= s || dx * dx + dy * dy > r2) continue;
+        out[yy * s + xx] = 1;
+      }
+    }
+  }
+  return out;
+}
+
+/** 道路・線路の細線化の前に埋める小さな穴の最大面積 (マス) */
+export const MAX_LOOP_AREA = 6;
+/**
+ * 並走する線を 1 本にまとめる半径 (マス。細線化の前に、この半径で太らせる)。間が 2r マス以下の並走線がつながって 1 本の中心線になる。
+ * 線路 (複線・操車場の本線の束): 2 (間が 4 マス = 約 31m 以下)。道路 (上下線の分離帯など): 1 (間が 2 マス以下)。
+ */
+export const MERGE_RADIUS = { road: 1, rail: 1 };
+/** 立体交差で、上を通る線の周り (この半径のマス) にある、下の線のマスを消す。MERGE_RADIUS の 2 倍より大きくして (太らせた下の線の端が上の線に届かないように)、細線化で下の線がつながり直らないようにする。 */
+export const CUT_RADIUS = { road: 0, rail: 0 };
+/** 駅のマスを、この半径 (マス) 以内の最も近い線路のマスへ寄せる (駅は線路の上にある)。 */
+export const STATION_SNAP_RADIUS = 12;
+/** 駅の面から塗った線路のマスが、近くの線(路線)に加わる半径 (マス)。 */
+export const ADOPT_RADIUS = 6;
+
 // ---- 塗る ----
 const GRASS = classId("natural", "grass"), SEA = classId("sea", "sea"), WATER = classId("natural", "water");
 const BUILDING = classId("building", "yes"), URBAN = classId("landuse", "residential");
@@ -162,8 +244,8 @@ export function stationMarkers(store: FeatureStore, nodes: [number, number][] = 
 }
 /** 建物からこのマス数以内の「何もない陸」は草ではなく市街地にする (OSM は建物の隙間や庭を塗っていないため) */
 export const URBAN_RADIUS = 3;
-/** 作業台の余白 (マス)。市街地の判定 (URBAN_RADIUS) と、線路の細線化がタイルの境目で途切れないようにする */
-export const PAINT_MARGIN = 8;
+/** 作業台の余白 (マス)。市街地の判定 (URBAN_RADIUS)、線の細線化、立体交差の切断、駅のマスを線路へ寄せる処理が、タイルの境目で食い違わないようにする */
+export const PAINT_MARGIN = 16;
 const LAND = 64;                                  // 作業用: byte3 の bit6 = 陸地ポリゴンの内側
 const waterRank = CLASSES[WATER - 1].rank;
 const rankOf = (id: number) => CLASSES[id - 1]?.rank ?? 0;
@@ -181,12 +263,18 @@ export class Painter {
   readonly w: number;            // 領域の 1 辺 (マス)
   readonly stride: number;       // 余白つきの 1 辺。余白は市街地の判定がタイルの境目で途切れないようにする
   readonly cells: Uint8Array;
+  private prio: Uint8Array[];        // 道路 (0) と線路 (1) の、各マスを塗った線の最も高い優先度 (立体交差)
+  private areaRail: Uint8Array;       // 線路のマスのうち、駅の面から塗って、線に属さないもの
+  private grp: Uint32Array[];         // 同、そのマスを塗った線のまとまり (道路 = 優先度、線路 = 路線。名前のない線路は優先度)。同じまとまりの並走だけ 1 本にする
   private win: Window = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
   constructor(readonly n: number, readonly margin = PAINT_MARGIN) {
     this.w = n * BLOCK_SIZE;
     this.stride = this.w + 2 * margin;
     this.cells = new Uint8Array(this.stride * this.stride * 4);
+    this.prio = [new Uint8Array(this.stride * this.stride), new Uint8Array(this.stride * this.stride)];
+    this.areaRail = new Uint8Array(this.stride * this.stride);
+    this.grp = [new Uint32Array(this.stride * this.stride), new Uint32Array(this.stride * this.stride)];
   }
 
   /** areas / lines は store.areas() / store.lines() (rank の昇順の番号)。 */
@@ -194,6 +282,7 @@ export class Painter {
     stations: [number, number][] = []): void {
     const { w, cells, margin, stride } = this;
     cells.fill(0);
+    this.prio[0].fill(0); this.prio[1].fill(0); this.grp[0].fill(0); this.grp[1].fill(0); this.areaRail.fill(0);
     const ox = bx0 * BLOCK_SIZE - margin, oy = by0 * BLOCK_SIZE - margin;       // 余白の左上
     const win = this.win = { x0: ox, y0: oy, x1: ox + stride, y1: oy + stride };
     const at = (x: number, y: number) => ((y - oy) * stride + (x - ox)) * 4;
@@ -204,14 +293,18 @@ export class Painter {
         fillRings(l.parts, win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y) + 3] |= LAND; });
       }
     }
+    const foot = new Uint8Array(stride * stride);       // 駅舎・駅の面 (railway=station) の内側
     for (const i of areas) {
       if (!store.overlaps(i, win)) continue;
       const id = store.area.a[i];
       if (isStationArea(id)) {
+        if (id === ST_BUILDING || id === ST_RAILWAY) {
+          fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) foot[(y - oy) * stride + (x - ox)] = 1; });
+        }
         // 駅の面は面としては塗らず、線路にする (駅のマスは下で 1 つだけ置く)
         if (stationToRail(id)) {
           fillRings(store.partsOf(i), win, (y, xa, xb) => {
-            for (let x = xa; x < xb; x++) { const o = at(x, y) + 2; if (cells[o] === 0) cells[o] = RAIL; }
+            for (let x = xa; x < xb; x++) { const o = at(x, y) + 2; if (cells[o] === 0) { cells[o] = RAIL; this.areaRail[o >> 2] = 1; } }
           });
         }
         continue;
@@ -221,33 +314,204 @@ export class Painter {
     for (const i of lines) {
       if (!store.overlaps(i, win)) continue;
       const road = store.road.a[i], rail = store.rail.a[i], fl = store.flags.a[i];
-      const b3 = (fl & FL_HWY ? B3_HWY : 0) | (fl & FL_BRIDGE ? B3_BRIDGE : 0) | (fl & FL_CLIFF ? B3_CLIFF : 0);
+      const b3 = (fl & FL_HWY ? B3_HWY : 0) | (fl & FL_CLIFF ? B3_CLIFF : 0);
+      const pr = fl >> FL_PRIO_SHIFT, gr = store.grp.a[i];
       for (const p of store.partsOf(i)) {
         const plot = (x: number, y: number) => {
-          const o = at(x, y);
+          const o = at(x, y), c = o >> 2;
+          if (road && pr >= this.prio[0][c]) { this.prio[0][c] = pr; this.grp[0][c] = pr; }
+          if (rail) this.areaRail[c] = 0;
+          if (rail && pr >= this.prio[1][c]) { this.prio[1][c] = pr; this.grp[1][c] = gr ? gr << 4 : pr; }
           if (fl & FL_RIVER && (cells[o] === 0 || rankOf(cells[o]) < waterRank)) cells[o] = WATER;
           if (road) cells[o + 1] = road;
           if (rail) cells[o + 2] = rail;
           cells[o + 3] |= b3;
         };
-        // 線路は 1 マスに 1 つの細い線 (8 連結) で塗る。斜めの線路が階段状にならず、斜めのタイルでつなげられる
-        if (rail) linePathThin(p, win, plot); else linePath(p, win, plot);
+        // 道路・線路は 1 マスに 1 つの細い線 (8 連結) で塗り、後で 1 マス幅の中心線にして 4 連結に直す (thinLines)
+        if (road || rail) linePathThin(p, win, plot); else linePath(p, win, plot);
       }
     }
-    for (const [sx, sy] of stations) {                // 駅のマス (1 つの駅に 1 つ)
-      if (sx >= win.x0 && sx < win.x1 && sy >= win.y0 && sy < win.y1) cells[at(sx, sy)] = STATION_CELL;
+    this.thinLines();
+    // 駅舎の分だけ駅のマスを増やす: 駅舎のすぐ近く (1 マス以内) の線路のマスを、駅のマスにする (東京駅のような大きな駅は複数マス)
+    const near = dilate(foot, stride, 1);
+    for (let i = 0; i < near.length; i++) if (near[i] && cells[i * 4 + 2]) cells[i * 4] = STATION_CELL;
+    for (const [sx, sy] of stations) {                // 駅のマス (1 つの駅に 1 つ)。線路の上に置く
+      if (sx < win.x0 || sx >= win.x1 || sy < win.y0 || sy >= win.y1) continue;
+      const [tx, ty] = this.snapToRail(sx - ox, sy - oy);
+      cells[(ty * stride + tx) * 4] = STATION_CELL;
     }
-    this.thinRails();
     this.urbanize();
   }
 
-  /** 線路のマスを 1 マス幅の中心線にする (複線やホームの塗りつぶしを 1 本の鎖にまとめる)。 */
-  private thinRails(): void {
+  /**
+   * z17 の道路・線路だけを塗る (面・駅・市街地は塗らない)。窓は z17 のマス座標 (bx0, by0 は z17 のブロック)。
+   * 地物の座標 (z18 のマス) を半分にして、同じ手順 (まとめる・細線化・4 連結化・立体交差) で z17 の格子の上に作る。
+   * z17 で出さない細い道・線路は、細線化の前に除く (細線化のあとに除くと、つなぎ目の短い線が残る)。
+   */
+  paintLines17(bx0: number, by0: number, store: FeatureStore, lines: Uint32Array): void {
+    const { cells, margin, stride } = this;
+    cells.fill(0);
+    this.prio[0].fill(0); this.prio[1].fill(0); this.grp[0].fill(0); this.grp[1].fill(0); this.areaRail.fill(0);
+    const ox = bx0 * BLOCK_SIZE - margin, oy = by0 * BLOCK_SIZE - margin;
+    const win = this.win = { x0: ox, y0: oy, x1: ox + stride, y1: oy + stride };
+    const w2 = { x0: ox * 2, y0: oy * 2, x1: (ox + stride) * 2, y1: (oy + stride) * 2 };
+    const at = (x: number, y: number) => ((y - oy) * stride + (x - ox)) * 4;
+    const rmin = roadMin(17), tmin = railMin(17);
+    for (const i of lines) {
+      if (!store.overlaps(i, w2)) continue;
+      const road = store.road.a[i], rail = store.rail.a[i], fl = store.flags.a[i];
+      const hwy = (fl & FL_HWY) !== 0;
+      const useRoad = road !== 0 && rankOf(road) >= rmin, useRail = rail !== 0 && rankOf(rail) >= tmin;
+      if (!hwy && !useRoad && !useRail) continue;
+      const pr = fl >> FL_PRIO_SHIFT, gr = store.grp.a[i];
+      for (const p0 of store.partsOf(i)) {
+        const p = p0.map((v) => v / 2);
+        const plot = (x: number, y: number) => {
+          const o = at(x, y), c = o >> 2;
+          if (useRoad && pr >= this.prio[0][c]) { this.prio[0][c] = pr; this.grp[0][c] = pr; }
+          if (useRail) { this.areaRail[c] = 0; if (pr >= this.prio[1][c]) { this.prio[1][c] = pr; this.grp[1][c] = gr ? gr << 4 : pr; } }
+          if (useRoad) cells[o + 1] = road;
+          if (useRail) cells[o + 2] = rail;
+          if (hwy) cells[o + 3] |= B3_HWY;
+        };
+        linePathThin(p, win, plot);
+      }
+    }
+    this.thinLines();
+  }
+
+  /** z17 のブロック (i, j) の線: 256*256*3 バイト (道路、線路、byte3 のうち高速道路・隠れた道路・隠れた線路)。 */
+  line17Block(i: number, j: number): Uint8Array {
+    const out = new Uint8Array(CELLS * 3), m = this.margin;
+    for (let ly = 0; ly < BLOCK_SIZE; ly++) {
+      for (let lx = 0; lx < BLOCK_SIZE; lx++) {
+        const s = ((j * BLOCK_SIZE + ly + m) * this.stride + i * BLOCK_SIZE + lx + m) * 4, d = (ly * BLOCK_SIZE + lx) * 3;
+        out[d] = this.cells[s + 1]; out[d + 1] = this.cells[s + 2];
+        out[d + 2] = this.cells[s + 3] & (B3_HWY | B3_ROAD_UNDER | B3_RAIL_UNDER);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 道路・線路のマスを、1 マス幅の中心線にして、4 連結 (上下左右だけでつながる) に直す。
+   * 小さな輪を埋め、複線や駅のホームの塗りつぶし、並走する道路を 1 本の鎖にまとめてから、斜めの所に角のマスを足す。
+   * まとめるのは、同じまとまり (線路 = 同じ路線、道路 = 同じ優先度) の線だけ。違う路線は別々に細線化する
+   * (東京駅のように違う路線が並ぶ所は、並んだまま)。
+   * 立体交差: 優先度の高い線の周り (半径 CUT_RADIUS) にある、低い線のマスは絵から消す (消したマスには「通っている」印を付ける)。
+   * 細線化の後に消すので、消した所もつながった鎖のまま、印が続く。
+   * 足したマスや埋めたマスの種別 (道路・線路の分類、高速道路・橋のビット) は、同じまとまりの隣の最も rank の高いマスから引き継ぐ。
+   */
+  private thinLines(): void {
     const { stride: s, cells } = this;
-    const mask = new Uint8Array(s * s);
-    for (let i = 0; i < mask.length; i++) mask[i] = cells[i * 4 + 2] !== 0 ? 1 : 0;
-    thinMask(mask, s);
-    for (let i = 0; i < mask.length; i++) if (!mask[i]) cells[i * 4 + 2] = 0;
+    const n = s * s;
+    for (const layer of [1, 2]) {                    // 1 = 道路 (byte1)、2 = 線路 (byte2)
+      const r = layer === 1 ? MERGE_RADIUS.road : MERGE_RADIUS.rail;
+      const cut = layer === 1 ? CUT_RADIUS.road : CUT_RADIUS.rail;
+      const pr = this.prio[layer - 1], gp = this.grp[layer - 1];
+      if (layer === 2) this.adoptAreaRails();
+      const keys = new Set<number>();
+      for (let i = 0; i < n; i++) if (cells[i * 4 + layer]) keys.add(gp[i]);
+      // まとまりごとの細線化の結果: 中心線のマス、その種別、優先度
+      const parts: { cls: Uint8Array; pri: Uint8Array; hwy: Uint8Array }[] = [];
+      for (const key of keys) {
+        const orig = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (cells[i * 4 + layer] && gp[i] === key) orig[i] = 1;
+        const mask = dilate(orig, s, r);
+        fillSmallHoles(mask, s, MAX_LOOP_AREA);
+        thinMask(mask, s);
+        stairify(mask, s);
+        const cls = new Uint8Array(n), pri = new Uint8Array(n), hwy = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+          if (!mask[i]) continue;
+          // 元のマスならそのまま。中心線のマスは、近く (r + 1 マス以内) の同じまとまりの元のマスのうち、最も近く rank の高いものを引き継ぐ
+          let best = -1, bestD = 1e9, bestRank = -1;
+          const x = i % s, y = (i / s) | 0, R = r + 1;
+          for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= s || ny >= s) continue;
+            const j = ny * s + nx;
+            if (!orig[j]) continue;
+            const d = dx * dx + dy * dy, rk = rankOf(cells[j * 4 + layer]);
+            if (d < bestD || (d === bestD && rk > bestRank)) { bestD = d; bestRank = rk; best = j; }
+          }
+          if (best < 0) continue;
+          cls[i] = cells[best * 4 + layer]; pri[i] = pr[best];
+          if (layer === 1) hwy[i] = cells[best * 4 + 3] & B3_HWY ? 1 : 0;
+        }
+        parts.push({ cls, pri, hwy });
+      }
+      // 立体交差: 各マスの周りにある、他のまとまりの最も高い優先度 (自分より高ければ、自分は消える)
+      const above = new Int16Array(n).fill(-1), aboveKey = new Int32Array(n).fill(-1);
+      parts.forEach((p, k) => {
+        for (let i = 0; i < n; i++) {
+          if (!p.cls[i]) continue;
+          const x = i % s, y = (i / s) | 0;
+          for (let dy = -cut; dy <= cut; dy++) for (let dx = -cut; dx <= cut; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= s || ny >= s || dx * dx + dy * dy > cut * cut + cut) continue;
+            const j = ny * s + nx;
+            if (p.pri[i] > above[j]) { above[j] = p.pri[i]; aboveKey[j] = k; }
+          }
+        }
+      });
+      const under = layer === 1 ? B3_ROAD_UNDER : B3_RAIL_UNDER;
+      const outCls = new Uint8Array(n), outPri = new Int16Array(n).fill(-1), outHwy = new Uint8Array(n), hid = new Uint8Array(n);
+      parts.forEach((p, k) => {
+        for (let i = 0; i < n; i++) {
+          if (!p.cls[i]) continue;
+          if (above[i] > p.pri[i] && aboveKey[i] !== k) { hid[i] = 1; continue; }
+          if (p.pri[i] > outPri[i]) { outPri[i] = p.pri[i]; outCls[i] = p.cls[i]; outHwy[i] = p.hwy[i]; }
+        }
+      });
+      for (let i = 0; i < n; i++) {
+        const o = i * 4;
+        const had = cells[o + layer] !== 0;
+        cells[o + layer] = outCls[i];
+        // 高速道路のビットは、道路の種別を持つ線のマスだけ扱う (高速道路そのものは種別なしで、ビットだけで塗られている)
+        if (layer === 1 && (had || outCls[i])) cells[o + 3] = (cells[o + 3] & ~B3_HWY) | (outHwy[i] ? B3_HWY : 0);
+        if (hid[i]) cells[o + 3] |= under;
+      }
+    }
+  }
+
+  /**
+   * 駅のホーム・駅舎の面から塗った線路のマスには、路線がない (線のまとまりが 0)。そのまま別のまとまりにすると、
+   * 同じ駅の線路と並んで梯子のようになるので、近く (ADOPT_RADIUS マス以内) の最も近い線のマスの、まとまりと優先度を引き継ぐ。
+   */
+  private adoptAreaRails(): void {
+    const { stride: s, cells } = this, gp = this.grp[1], pr = this.prio[1], R = ADOPT_RADIUS;
+    const n = s * s, set: [number, number, number][] = [];
+    const ar = this.areaRail, isLine = (i: number) => cells[i * 4 + 2] !== 0 && !ar[i];
+    for (let i = 0; i < n; i++) {
+      if (!ar[i]) continue;
+      const x = i % s, y = (i / s) | 0;
+      let bestD = 1e9, bg = 0, bp = 0;
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= s || ny >= s) continue;
+        const j = ny * s + nx, d = dx * dx + dy * dy;
+        if (d < bestD && isLine(j)) { bestD = d; bg = gp[j]; bp = pr[j]; }
+      }
+      if (bestD < 1e9) set.push([i, bg, bp]);
+    }
+    for (const [i, g, p] of set) { gp[i] = g; pr[i] = p; }
+  }
+
+  /** 作業台の座標 (x, y) (余白込み) に最も近い線路のマス (半径 STATION_SNAP_RADIUS 以内)。なければそのまま。 */
+  private snapToRail(x: number, y: number): [number, number] {
+    const { stride: s, cells } = this, R = STATION_SNAP_RADIUS;
+    let best: [number, number] = [x, y], bestD = Infinity;
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dx = -R; dx <= R; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= s || ny >= s) continue;
+        const d = dx * dx + dy * dy;
+        if (d > R * R || d >= bestD || !cells[(ny * s + nx) * 4 + 2]) continue;
+        bestD = d; best = [nx, ny];
+      }
+    }
+    return best;
   }
 
   /** 建物から URBAN_RADIUS マス以内で、面が何も塗られていない陸のマスを市街地にする。 */

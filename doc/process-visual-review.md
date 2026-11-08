@@ -32,12 +32,13 @@ ROM の絵や ID を変えると、ROM・サーバー・DB が連動して変わ
 - **絵・パレットの案**: 候補の絵を、実機と同じ 16×16・同じパレットで描いた画像にする。複数案は並べる。
   タイルを敷き詰めた画像(街らしさ)や、組み合わせの見本(線路の輪・斜め・曲線など)も添える。
   全タイルの一覧は `make preview`(`tiles.png`)で出る。
-- **塗り方・判定の変更**: 変更後の出力を、基準地点の前後比較で見られるようにする。
-  - 本番の DB(`data/world.sqlite`)は上書きしない。変更後の DB を、基準地点を含む小さな範囲で別ファイルに作る:
-    `bun server/build_world.ts build --bbox <基準地点を含む範囲> --pbf data/osm/<地域>-latest.osm.pbf --out data/preview.sqlite`
-    (PBF を 3 回読むので、範囲が小さくても約 2〜3 分かかる)。
-  - 変更後と変更前を並べる: `bun server/preview.ts --db data/preview.sqlite --before data/world.sqlite --spots "名前:緯度,経度;..."`
-  - 変更前の DB が古くて比較にならないときは、変更前のコードで同じ範囲を作る。
+- **塗り方・判定の変更**: 変更後の出力を、基準地点で見られるようにする。**`make sample`** を使う。
+  - `bun server/build_world.ts sample`: 基準地点(`server/spots.ts`。起動位置・東京駅・豊洲・奥多摩・房総南端・熊谷・筑波山)の周り
+    (±0.02°、約 1.7×2.2 km)だけの小さな DB `data/sample.sqlite` を、PBF の 1 回の読み込みで作る(約 1〜2 分。全体は約 6 分)。
+    本番の `data/world.sqlite` は上書きしない。続けて、同じ地点を航空写真と並べて描き、ブラウザで開く(`make sample` はこの 2 つを続けて行う)。
+  - 変更前と並べる: `bun server/preview.ts --db data/sample.sqlite --before <変更前の DB>`(変更前の DB が古いときは、変更前のコードで `sample` を作る)。
+  - **全体の生成(約 6 分)は、この確認で承認を得てから行う**。確認の前に全体を作ると、やり直しで時間を無駄にする。
+  - 地点を足すときは、`server/spots.ts` の `DEFAULT_SPOTS` を直す(変更の種類に応じて、操車場のある駅や入り組んだ海岸など)。
 - **データを使わない変更**(合成のケース): 角度の違う直線、円弧、T 字、太い帯などの合成データを、旧方式と新方式で描き分けて並べる。
   実データで再現しにくい問題(複線、曲線)に有効。
 
@@ -64,7 +65,7 @@ ROM の絵や ID を変えると、ROM・サーバー・DB が連動して変わ
 - ROM(`gfx/gen_chr.ts`、`src/*`)、サーバー、ビルダーを変更し、テストを通す(`make test`、`bunx tsc --noEmit -p .`、`make`)。
 - ID を変えるときは、`src/terrain.h`、`server/terrain.ts`、`gfx/gen_chr.ts`、`src/main.c` の `tile_pal[]` を同時に直す。
 
-### 手順 6: 地図を生成する
+### 手順 6: 地図を生成する(`make sample` の承認の後)
 
 - DB は別ファイルに作ってから差し替える(動作中のサーバーが、元のファイルを開いたままのため)。
   差し替えたら、サーバーを再起動する。ビルドの経過は、ログの最後の行とプロセス(`ps`)で確認する
@@ -112,7 +113,8 @@ ROM の絵や ID を変えると、ROM・サーバー・DB が連動して変わ
 
 | 道具 | 内容 |
 | --- | --- |
-| `make preview` | 見栄えの確認ページ(`data/compare/preview.html`)を作って開く |
+| `make sample` | 基準地点の周りだけの小さな DB(`data/sample.sqlite`)を作り、見栄えの確認ページを開く。**全体の生成の前に必ず行う** |
+| `make preview` | 見栄えの確認ページ(`data/compare/preview.html`)を作って開く(`data/world.sqlite` を描く) |
 | `bun server/preview.ts [--db] [--before] [--spots] [--out] [--no-photo] [--open]` | 同じ。DB や地点を指定できる |
 | `server/png.ts`、`server/romtables.ts` | PNG の書き出し、ROM のパレット・色の表(絵は `gfx/tiles.chr`) |
 | `data/compare/` | 確認用の画像とページの置き場所(`.gitignore`。コミットしない) |

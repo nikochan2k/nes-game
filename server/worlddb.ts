@@ -87,7 +87,8 @@ export function classId(key: string, value: string): number {
 }
 
 // byte3 のビット
-export const B3_BRIDGE = 1, B3_CLIFF = 2, B3_HWY = 32;
+// byte3 のビット: bit0 = 道路が通るが、上の線 (高架・陸橋) に隠れている、bit1 = 崖、bit5 = 高速道路、bit7 = 線路が通るが、上の線に隠れている
+export const B3_ROAD_UNDER = 1, B3_CLIFF = 2, B3_HWY = 32, B3_RAIL_UNDER = 128;
 export const B3_SLOPE_SHIFT = 2;              // bit2〜4 = 傾斜の段階 0〜7
 // 傾斜の段階: 0:<5° 1:<10° 2:<17° 3:<25° 4:<35° 5:<45° 6:<60° 7:60°〜
 export const SLOPE_MOUNTAIN = 4;              // 25° 以上
@@ -107,6 +108,9 @@ CREATE TABLE IF NOT EXISTS block (
   data BLOB,
   PRIMARY KEY (bx, by)
 ) WITHOUT ROWID;
+-- z17 の道路・線路。z18 のマスを集めずに、地図データから z17 の格子 (1 ブロック = z17 の 256x256 マス) で細線化して作る。
+-- data は deflate した 256*256*3 バイト (道路の種別、線路の種別、byte3 のうち高速道路・隠れた道路・隠れた線路のビット)。線のないブロックは行を作らない
+CREATE TABLE IF NOT EXISTS line17 (bx INTEGER NOT NULL, by INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (bx, by)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 `;
 
@@ -180,4 +184,11 @@ function topClass(cells: Uint8Array, byte: 1 | 2): number {
     }
   }
   return top;
+}
+
+/** z17 の線のブロックを書く。cells は 256*256*3 バイト。全部 0 なら行を作らない。 */
+export function writeLine17(db: Database, bx: number, by: number, cells: Uint8Array): void {
+  if (cells.length !== CELLS * 3) throw new Error("line17 block must be 256*256*3 bytes");
+  if (cells.every((v) => v === 0)) return;
+  db.prepare("INSERT OR REPLACE INTO line17 (bx, by, data) VALUES (?, ?, ?)").run(bx, by, deflateSync(cells));
 }

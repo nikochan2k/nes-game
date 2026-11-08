@@ -32,7 +32,7 @@ export function latToY(lat: number): number {
 // 座標は 1/64 マスの固定小数点 Int32 にして 1 本の配列 (アリーナ) に並べる。
 type TypedCtor<T> = new (n: number) => T;
 
-class Grow<T extends Float64Array | Int32Array | Uint32Array | Uint8Array> {
+class Grow<T extends Float64Array | Int32Array | Uint32Array | Uint16Array | Uint8Array> {
   a: T;
   n = 0;
   constructor(private ctor: TypedCtor<T>, cap = 1024) { this.a = new ctor(cap); }
@@ -52,12 +52,14 @@ export const FIX = 64;                              // 座標の固定小数点 
 export interface FeatureAttrs {
   rank: number; area?: number; road?: number; rail?: number;
   hwy?: boolean; river?: boolean; bridge?: boolean; cliff?: boolean;
+  prio?: number;                 // 線の上下の優先度 (0..15)。交差する線のうち高い方が上を通り、低い方は交差の所で切れる
+  grp?: number;                  // 路線の識別 (1..65535。0 = 名前なし)。同じ路線の並走だけ 1 本にまとめる
 }
-export const FL_HWY = 1, FL_RIVER = 2, FL_BRIDGE = 4, FL_CLIFF = 8;
+export const FL_HWY = 1, FL_RIVER = 2, FL_BRIDGE = 4, FL_CLIFF = 8, FL_PRIO_SHIFT = 4;
 
 export class FeatureStore {
   rank = new Grow(Uint8Array); area = new Grow(Uint8Array); road = new Grow(Uint8Array);
-  rail = new Grow(Uint8Array); flags = new Grow(Uint8Array);
+  rail = new Grow(Uint8Array); flags = new Grow(Uint8Array); grp = new Grow(Uint16Array);
   start = new Grow(Int32Array); rings = new Grow(Int32Array);
   minx = new Grow(Int32Array); miny = new Grow(Int32Array);
   maxx = new Grow(Int32Array); maxy = new Grow(Int32Array);
@@ -83,8 +85,9 @@ export class FeatureStore {
     }
     if (n === 0) return false;
     this.rank.push(at.rank); this.area.push(at.area ?? 0); this.road.push(at.road ?? 0);
-    this.rail.push(at.rail ?? 0);
-    this.flags.push((at.hwy ? FL_HWY : 0) | (at.river ? FL_RIVER : 0) | (at.bridge ? FL_BRIDGE : 0) | (at.cliff ? FL_CLIFF : 0));
+    this.rail.push(at.rail ?? 0); this.grp.push(at.grp ?? 0);
+    this.flags.push((at.hwy ? FL_HWY : 0) | (at.river ? FL_RIVER : 0) | (at.bridge ? FL_BRIDGE : 0) | (at.cliff ? FL_CLIFF : 0)
+      | (Math.min(15, at.prio ?? 0) << FL_PRIO_SHIFT));
     this.start.push(startAt); this.rings.push(n);
     this.minx.push(minx); this.miny.push(miny); this.maxx.push(maxx); this.maxy.push(maxy);
     return true;
@@ -142,7 +145,26 @@ const RAIL_ALIAS: Record<string, string> = { monorail: "light_rail", narrow_gaug
 const roadId = (v: string) => CLASSES.some((c) => c.kind === KIND_ROAD && c.value === v) ? classId("highway", v) : 0;
 const railId = (v: string) => CLASSES.some((c) => c.kind === KIND_RAIL && c.value === v) ? classId("railway", v) : 0;
 
-export interface LineAttrs { road: number; rail: number; hwy: boolean; river: boolean; bridge: boolean; cliff: boolean }
+export interface LineAttrs { road: number; rail: number; hwy: boolean; river: boolean; bridge: boolean; cliff: boolean; prio: number; grp: number }
+
+/**
+ * 線の上下の優先度 (0..15): 層 (layer タグ。なければ、橋なら 1、地上なら 0) × 2 + 高速鉄道 (highspeed=yes、新幹線) 1。
+ * 交差する線のうち優先度の高い方が上を通る (陸橋・高架)。同じ層なら、新幹線が相鉄線のような在来線より上に出る。
+ */
+export function linePrio(tags: Record<string, string>, bridge: boolean): number {
+  const layer = Number.parseInt(tags.layer ?? "", 10);
+  const e = Number.isNaN(layer) ? (bridge ? 1 : 0) : Math.max(0, Math.min(7, layer));
+  return e * 2 + (tags.highspeed === "yes" ? 1 : 0);
+}
+
+/** 路線の識別: 名前 (なければ路線番号、事業者) の文字列から 1..65535。名前がなければ 0。同じ路線の複線・並走線は同じ値になる。 */
+export function routeGroup(tags: Record<string, string>): number {
+  const k = tags.name ?? tags.ref ?? tags.operator;
+  if (!k) return 0;
+  let h = 2166136261;
+  for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
+  return ((h >>> 0) % 65535) + 1;
+}
 
 /** ウェイの線としての意味。tunnel=yes は地上に出ないので無視。何もなければ null。 */
 export function lineAttrsOf(tags: Record<string, string>): LineAttrs | null {
@@ -153,12 +175,13 @@ export function lineAttrsOf(tags: Record<string, string>): LineAttrs | null {
   const sidewalk = tags.footway === "sidewalk" || tags.footway === "crossing" || tags.cycleway === "crossing";
   const road = hv && !hwy && !sidewalk ? roadId(ROAD_ALIAS[hv] ?? hv) : 0;
   const rv = tags.railway;
-  const rail = rv ? railId(RAIL_ALIAS[rv] ?? rv) : 0;
+  // 操車場・側線・引き込み線・渡り線 (service=yard / siding / spur / crossover) は、並走する線が多く、1 本の線にならないので使わない
+  const rail = rv && tags.service === undefined ? railId(RAIL_ALIAS[rv] ?? rv) : 0;
   const river = tags.waterway === "river" || tags.waterway === "canal";
   const cliff = tags.natural === "cliff";
   if (!hwy && !road && !rail && !river && !cliff) return null;
   const bridge = (hwy || road > 0 || rail > 0) && tags.bridge !== undefined && tags.bridge !== "no";
-  return { road, rail, hwy, river, bridge, cliff };
+  return { road, rail, hwy, river, bridge, cliff, prio: linePrio(tags, bridge), grp: rail ? routeGroup(tags) : 0 };
 }
 
 const rankOf = (id: number) => CLASSES[id - 1]?.rank ?? 0;
@@ -251,6 +274,7 @@ export function assembleRings(ways: number[][]): number[][] {
 // ---- 読み込み ----
 export interface LoadOptions {
   bbox: [number, number, number, number];     // w, s, e, n (度)
+  bboxes?: [number, number, number, number][];   // 離れた複数の範囲を 1 回の読み込みで集める (見栄えの確認用)。あれば bbox の代わりに使う
   margin?: number;                            // 外側に広げる度数 (既定 0.05)
   log?: (msg: string) => void;                // 進行の表示
 }
@@ -290,7 +314,8 @@ class IdIndex {
  */
 export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loaded> {
   const m = opt.margin ?? 0.05;
-  const [w, s, e, n] = [opt.bbox[0] - m, opt.bbox[1] - m, opt.bbox[2] + m, opt.bbox[3] + m];
+  const boxes = (opt.bboxes ?? [opt.bbox]).map((b) => [b[0] - m, b[1] - m, b[2] + m, b[3] + m]);
+  const inRange = (lon: number, lat: number) => boxes.some(([w, s, e, n]) => lon >= w && lon <= e && lat >= s && lat <= n);
   const log = opt.log ?? (() => {});
   const mem = () => `rss ${(process.memoryUsage().rss / 1048576).toFixed(0)}MB`;
   const gc = () => (globalThis as { Bun?: { gc(force: boolean): void } }).Bun?.gc(true);
@@ -314,17 +339,17 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
   // 2. ノード (範囲内か) とウェイ
   let inBox: IdMap | null = new IdMap(1 << 16, false);
   const wId = new Grow(Float64Array), wStart = new Grow(Int32Array), wLen = new Grow(Int32Array);
-  const wInfo = new Grow(Uint32Array), refs = new Grow(Float64Array, 1 << 16);
+  const wInfo = new Grow(Uint32Array), wPrio = new Grow(Uint8Array), wGrp = new Grow(Uint16Array), refs = new Grow(Float64Array, 1 << 16);
   const stationNodes: [number, number][] = [];
   await scanPbf(pbf, {
     node(id, lat, lon) {
-      if (lon >= w && lon <= e && lat >= s && lat <= n) inBox!.set(id);
+      if (inRange(lon, lat)) inBox!.set(id);
     },
     taggedNode(_id, lat, lon, tags) {
       // 駅は面ではなく点だけで登録されていることが多い (railway=station / halt、public_transport=station の鉄道駅)
       const isStation = tags.railway === "station" || tags.railway === "halt"
         || (tags.public_transport === "station" && tags.train === "yes");
-      if (isStation && lon >= w && lon <= e && lat >= s && lat <= n) stationNodes.push([lonToX(lon), latToY(lat)]);
+      if (isStation && inRange(lon, lat)) stationNodes.push([lonToX(lon), latToY(lat)]);
     },
     way(id, tags, r) {
       const isMember = memberWays.has(id);
@@ -341,6 +366,7 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
         | (touches ? W_TOUCH : 0) | (isMember ? W_MEMBER : 0);
       wId.push(id); wStart.push(refs.n); wLen.push(r.length);
       wInfo.push((area | ((line?.road ?? 0) << 8) | ((line?.rail ?? 0) << 16) | (bits << 24)) >>> 0);
+      wPrio.push(line?.prio ?? 0); wGrp.push(line?.grp ?? 0);
       for (const x of r) refs.push(x);
     },
   });
@@ -404,7 +430,7 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
       const xy = toXY(wStart.a[i], wLen.a[i]);
       if (xy.length >= 4) {
         store.add({ rank: Math.max(rankOf(road), rankOf(rail)), road, rail, hwy: !!(bits & W_HWY),
-          river: !!(bits & W_RIVER), bridge: !!(bits & W_BRIDGE), cliff: !!(bits & W_CLIFF) }, [xy]);
+          river: !!(bits & W_RIVER), bridge: !!(bits & W_BRIDGE), cliff: !!(bits & W_CLIFF), prio: wPrio.a[i], grp: wGrp.a[i] }, [xy]);
       }
     }
   }

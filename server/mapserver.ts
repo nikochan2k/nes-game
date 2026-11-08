@@ -11,7 +11,7 @@
  *   [4:7]  タイル y (同上)
  *   [7]    xo<<4 | yo   タイル内のマス位置 (1 タイル = 16x16 マス)
  *   [8]    vertical<<7 | len   vertical=1 なら y 方向、0 なら x 方向に len マス (1..63)
- * 応答: len バイト (1 マス 1 バイトの地形 ID)
+ * 応答: len バイト (1 マス 1 バイト。下位 6bit が地形 ID、上位 2bit が「道路でもある」「線路でもある」フラグ)
  *
  * マスの世界座標は X = tx*16+xo, Y = ty*16+yo。1 辺は 2**(z+4) マス。
  * X は経度方向なので巻き戻し、Y が範囲外なら T_ROCK (極の外側) を返す。
@@ -20,7 +20,8 @@ import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { OsmSource } from "./osmsource";
 
-import { T_ROCK, T_ROAD, T_WATER, T_MOUNTAIN, T_FOREST, T_GRASS } from "./terrain";
+import { T_ROCK, T_WATER, T_MOUNTAIN, T_FOREST, T_GRASS } from "./terrain";
+import { ARM_E, ARM_N, ARM_S, ARM_W, roadTile } from "./rail";
 
 export * from "./terrain";
 
@@ -63,6 +64,8 @@ function fbm(u: number, v: number, seed: number, octaves: number): number {
 
 export interface Source {
   cell(z: number, x: number, y: number): number;
+  /** 応答の上位 2bit (道路でもある・線路でもある。terrain.ts)。なければ 0。 */
+  flags?(z: number, x: number, y: number): number;
 }
 
 /** ノイズで作った仮の世界。ズームしても同じ場所が同じ地形になる。 */
@@ -109,13 +112,13 @@ export class SyntheticSource implements Source {
     }
     if (z >= 9) {               // 拡大すると 32 マスおきに道路が通る
       if (x % 32 === 0 && y % 32 === 0) {
-        return T_ROAD;
+        return roadTile(ARM_E | ARM_S | ARM_W | ARM_N);
       }
       if (x % 32 === 0) {
-        return T_ROAD;
+        return roadTile(ARM_S | ARM_N);
       }
       if (y % 32 === 0) {
-        return T_ROAD;
+        return roadTile(ARM_E | ARM_W);
       }
     }
     return t;
@@ -150,7 +153,8 @@ export function answer(source: Source, req: Uint8Array): Uint8Array {
     return res.fill(T_ROCK);
   }
   for (let i = 0; i < n; i++) {
-    res[i] = vertical ? source.cell(z, x, y + i) : source.cell(z, x + i, y);
+    const cx = vertical ? x : x + i, cy = vertical ? y + i : y;
+    res[i] = source.cell(z, cx, cy) | (source.flags?.(z, cx, cy) ?? 0);
   }
   return res;
 }

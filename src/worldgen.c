@@ -64,10 +64,10 @@ unsigned char worldgen_cell(unsigned x, unsigned y)
 
     /* 32 マスおきの道路。水の上は橋、岩の上は道路。 */
     if ((x & 31) == 0) {
-        return T_ROAD;
+        return (y & 31) == 0 ? T_ROAD_CROSS : T_ROAD_V;
     }
     if ((y & 31) == 0) {
-        return T_ROAD;
+        return T_ROAD_H;
     }
     return t;
 }

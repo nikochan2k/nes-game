@@ -8,10 +8,10 @@
 import { Database } from "bun:sqlite";
 import { inflateSync } from "node:zlib";
 import type { Source } from "./mapserver";
-import { crossingFor, railConnections, railPair, railTile } from "./rail";
+import { armsOf, crossingFor, railTile, roadTile } from "./rail";
 import * as T from "./terrain";
 import {
-  B3_BRIDGE, B3_CLIFF, B3_HWY, B3_SLOPE_SHIFT, CLASSES, SLOPE_MOUNTAIN, SLOPE_ROCK,
+  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, B3_ROAD_UNDER, B3_SLOPE_SHIFT, CLASSES, SLOPE_MOUNTAIN, SLOPE_ROCK,
 } from "./worlddb";
 
 // ---- 種別の意味 ----
@@ -34,7 +34,7 @@ const NONE = 1000;
 /** [z の下限, 出す一般道路の rank の下限]。上から順に見て最初に当てはまるもの。 */
 // 都心 (東京駅・渋谷・豊洲) で道路マスが画面の 20〜50% に収まるように、プラン 8.3 の初期値から 3 段上げた。
 // z10 以下は一般道路を出さない (関東では trunk 以上が陸のブロックの約 6 割にあり、何を基準にしても全面が道路になる)
-export const ROAD_MIN: [number, number][] = [[18, 1], [17, 45], [16, 60], [15, 70], [13, 80], [11, 90]];
+export const ROAD_MIN: [number, number][] = [[18, 1], [17, 60], [16, 60], [15, 70], [13, 80], [11, 90]];
 /** 線路。 */
 export const RAIL_MIN: [number, number][] = [[15, 1], [12, 70], [6, 90]];
 
@@ -43,12 +43,12 @@ const pick = (t: [number, number][], z: number) => t.find(([zmin]) => z >= zmin)
 export const roadMin = (z: number) => pick(ROAD_MIN, z);
 /** この rank 以上の線路を出す。 */
 export const railMin = (z: number) => pick(RAIL_MIN, z);
-const hwyShown = (z: number) => z >= 6;
+const hwyShown = (_z: number) => true;      // 高速道路は全ズームで出す
 
 const ROCK_PCT = 30, MOUNT_PCT = 40;   // 集約時の割合のしきい値 (案)。8.2
 
 // ---- 1 マスの特徴 (ビットにして Map に入れる) ----
-const F_ROAD = 1, F_HWY = 2, F_RAIL = 4, F_BRIDGE = 8, F_CROSS = 16;
+const F_ROAD = 1, F_HWY = 2, F_RAIL = 4, F_ROAD_UNDER = 8, F_RAIL_UNDER = 16;     // 下 2 つ: 上の線に隠れて絵に出ない道路・線路が通るマス
 const F_BASE_SHIFT = 8;
 
 interface Block {
@@ -71,6 +71,8 @@ const repOf = (row: any): Rep => ({
 export class OsmSource implements Source {
   private db: Database;
   private blockQ;
+  private line17Q: ReturnType<Database["query"]> | null = null;   // z17 の線の層がある DB のみ
+  private lines17 = new Map<number, Uint8Array | null>();
   private repQ;
   private rank = new Uint8Array(256);       // osm_class.id → rank
   private kind = new Uint8Array(256);       // 面の id → K_*
@@ -88,6 +90,9 @@ export class OsmSource implements Source {
     this.blockQ = this.db.query("SELECT data, area FROM block WHERE bx = ? AND by = ?");
     this.repQ = this.db.query(
       "SELECT area, area_pct, road, rail, motorway, mount_pct, rock_pct FROM block WHERE bx = ? AND by = ?");
+    if (this.db.query("SELECT 1 FROM sqlite_master WHERE name = 'line17'").get() && this.db.query("SELECT 1 FROM line17 LIMIT 1").get()) {
+      this.line17Q = this.db.query("SELECT data FROM line17 WHERE bx = ? AND by = ?");
+    }
     let water = 0;
     for (const row of this.db.query("SELECT id, kind, key, value, rank FROM osm_class").all() as any[]) {
       this.rank[row.id] = row.rank;
@@ -143,6 +148,19 @@ export class OsmSource implements Source {
       this.blocks.delete(this.blocks.keys().next().value!);
     }
     return b;
+  }
+
+  /** z17 の線のブロック (256*256*3 バイト。なければ null)。 */
+  private line17(bx: number, by: number): Uint8Array | null {
+    const key = bx * 16384 + by;
+    let d = this.lines17.get(key);
+    if (d === undefined) {
+      const row = this.line17Q!.get(bx, by) as { data: Uint8Array } | null;
+      d = row ? inflateSync(row.data) : null;
+      if (this.lines17.size >= this.blockCache) this.lines17.delete(this.lines17.keys().next().value!);
+      this.lines17.set(key, d);
+    }
+    return d;
   }
 
   private rep(bx: number, by: number): Rep {
@@ -217,7 +235,7 @@ export class OsmSource implements Source {
     const rmin = roadMin(z), tmin = railMin(z), hwy = hwyShown(z);
     const { rank, kind, counts } = this;
     counts.fill(0);
-    let road = false, rail = false, hw = false, bridge = false, cross = false, waterN = 0;
+    let road = false, rail = false, hw = false, waterN = 0, roadUnder = false, railUnder = false;
     let rockN = 0, mountN = 0, stationN = 0, stationId = 0;
     for (let yy = y0; yy < y0 + s; yy++) {
       for (let xx = x0; xx < x0 + s; xx++) {
@@ -227,12 +245,10 @@ export class OsmSource implements Source {
         const k = kind[a];
         const r = cells[o + 1] !== 0 && rank[cells[o + 1]] >= rmin;
         const t = cells[o + 2] !== 0 && rank[cells[o + 2]] >= tmin;
-        if (r) {
-          road = true;
-          if (b3 & B3_BRIDGE) bridge = true;
-          if (t) cross = true;
-        }
+        if (r) road = true;
         if (t) rail = true;
+        if (b3 & B3_ROAD_UNDER) roadUnder = true;
+        if (b3 & B3_RAIL_UNDER) railUnder = true;
         if (hwy && (b3 & B3_HWY)) hw = true;
         if (k === K_WATER) waterN++;
         if (k === K_STATION) { stationN++; stationId = a; }
@@ -246,15 +262,25 @@ export class OsmSource implements Source {
         }
       }
     }
+    if (z === 17 && this.line17Q) {
+      // z17 の道路・線路は、z18 のマスを集めずに、地図データから z17 の格子で作ったもの (6.3)
+      const d = this.line17(x >> 8, y >> 8);
+      road = rail = hw = roadUnder = railUnder = false;
+      if (d) {
+        const o = (((y & 255) << 8) | (x & 255)) * 3, f3 = d[o + 2];
+        road = d[o] !== 0; rail = d[o + 1] !== 0; hw = (f3 & B3_HWY) !== 0;
+        roadUnder = (f3 & B3_ROAD_UNDER) !== 0; railUnder = (f3 & B3_RAIL_UNDER) !== 0;
+      }
+    }
     const total = s * s;
     // 駅は 1 つの駅に 1 マスだけなので、多数決では埋もれる。子マスに駅があれば駅にする
     const area = stationN > 0 ? stationId : this.majority(counts);
     const rock = s <= 2 ? rockN > 0 : rockN * 100 >= ROCK_PCT * total;
     const mount = mountN * 100 >= MOUNT_PCT * total;
-    if (road && waterN > 0) bridge = true;
+    void waterN;
     return (this.base(area, rock, mount) << F_BASE_SHIFT)
       | (road ? F_ROAD : 0) | (hw ? F_HWY : 0) | (rail ? F_RAIL : 0)
-      | (road && bridge ? F_BRIDGE : 0) | (cross ? F_CROSS | F_ROAD | F_RAIL : 0);
+      | (roadUnder ? F_ROAD_UNDER : 0) | (railUnder ? F_RAIL_UNDER : 0);
   }
 
   /**
@@ -287,15 +313,12 @@ export class OsmSource implements Source {
       | (road >= need ? F_ROAD : 0) | (hw >= need ? F_HWY : 0) | (rail >= need ? F_RAIL : 0);
   }
 
-  /**
-   * 線路のつながる 2 方向 (server/rail.ts)。隣 (8 方向) のうち線路のあるものから決める。
-   */
-  private railPairAt(z: number, w: number, x: number, y: number): [number, number] {
-    const has = (dx: number, dy: number) => {
+  /** (z, x, y) の隣 (上下左右) のうち、mask のビットが立っているものから、つながる方向のビットを求める。 */
+  private armsAt(z: number, w: number, x: number, y: number, mask: number): number {
+    return armsOf((dx, dy) => {
       const yy = y + dy;
-      return yy >= 0 && yy < w && (this.feat(z, (((x + dx) % w) + w) % w, yy) & F_RAIL) !== 0;
-    };
-    return railPair(railConnections(has));
+      return yy >= 0 && yy < w && (this.feat(z, (((x + dx) % w) + w) % w, yy) & mask) !== 0;
+    });
   }
 
   cell(z: number, x: number, y: number): number {
@@ -309,17 +332,32 @@ export class OsmSource implements Source {
     if (base === T.T_STATION) {
       return T.T_STATION;                 // 駅は道路や線路より優先 (1 つの駅に 1 マスだけ)
     }
-    if (f & F_CROSS) {
-      return crossingFor(this.railPairAt(z, w, x, y)) === "V" ? T.T_CROSSING_V : T.T_CROSSING_H;
+    const road = (f & (F_ROAD | F_HWY)) !== 0, rail = (f & F_RAIL) !== 0;
+    if (rail) {
+      const ra = this.armsAt(z, w, x, y, F_RAIL);
+      if (road) {                         // 重なり: 直交する直線の踏切だけ絵にする。それ以外は線路を優先する
+        const c = crossingFor(ra, this.armsAt(z, w, x, y, F_ROAD | F_HWY));
+        if (c) return c === "V" ? T.T_CROSSING_V : T.T_CROSSING_H;
+      }
+      return railTile(ra);
     }
-    if (f & (F_ROAD | F_HWY)) {
-      return T.T_ROAD;                    // 道路は向きのない 1 種 (高速道路も、水の上の橋も同じ)
-    }
-    if (f & F_RAIL) {
-      const [a, b] = this.railPairAt(z, w, x, y);
-      return railTile(a, b);
+    if (road) {
+      return roadTile(this.armsAt(z, w, x, y, F_ROAD | F_HWY));
     }
     return base;
   }
 
+  /**
+   * 応答の上位 2bit (見た目に出ないフラグ。terrain.ts の F_ROAD_TOO / F_RAIL_TOO)。
+   * 道路でもある: 線路・踏切のマスに道路も重なる、または道路が上の線の下を通って隠れている。
+   * 線路でもある: 線路が上の線 (高架・新幹線) の下を通って隠れている (絵には出ないが、途切れず通れる)。
+   */
+  flags(z: number, x: number, y: number): number {
+    const w = 1 << (z + 4);
+    if (y < 0 || y >= w) return 0;
+    const f = this.feat(z, ((x % w) + w) % w, y);
+    if ((f >> F_BASE_SHIFT) === T.T_STATION) return 0;
+    const road = (f & (F_ROAD | F_HWY)) !== 0, rail = (f & F_RAIL) !== 0;
+    return ((rail && road) || (f & F_ROAD_UNDER) ? T.F_ROAD_TOO : 0) | ((f & F_RAIL_UNDER) ? T.F_RAIL_TOO : 0);
+  }
 }

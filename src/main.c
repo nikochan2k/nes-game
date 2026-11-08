@@ -39,16 +39,15 @@ enum { PROBE_NONE, PROBE_REQ, PROBE_OK, PROBE_BLOCKED };
 
 extern void wait_vblank(void);
 
-/* BG パレット: 0=緑 (草/森/山/湿地) 1=黄/赤 (砂/建物) 2=黒/濃い灰/白 (岩山/道路/線路/駅) 3=青 (水)
+/* BG パレット: 0=緑 (草/森/山) 1=黄/赤 (砂/建物) 2=黒/灰/白 (岩山/道路/線路/踏切/駅) 3=青/黄緑 (水/湿地)
  * (T_* の並び順) */
 static const unsigned char tile_pal[] = {
     0, 0, 0,                    /* 草 森 山 */
     2, 3,                       /* 岩山 水 */
     1,                          /* 建物 (黄/赤) */
-    1, 0,                       /* 砂 湿地 */
-    2,                          /* 道路 */
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2,   /* 線路 20 種 */
+    1, 3,                       /* 砂 湿地 */
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,   /* 道路 11 種 */
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,   /* 線路 11 種 */
     2, 2,                       /* 踏切 (横 縦) */
     2                           /* 駅 */
 };
@@ -56,8 +55,8 @@ static const unsigned char tile_pal[] = {
 static const unsigned char palette[32] = {
     0x1A, 0x0A, 0x2A, 0x17,
     0x1A, 0x28, 0x38, 0x16,   /* 砂・駅: 黄 淡い黄 赤 */
-    0x1A, 0x0F, 0x00, 0x30,   /* 黒 濃い灰 白 */
-    0x1A, 0x11, 0x21, 0x17,
+    0x1A, 0x0F, 0x00, 0x30,   /* 黒 灰 白 */
+    0x1A, 0x11, 0x21, 0x29,   /* 青 水色 黄緑 */
     0x1A, 0x0F, 0x36, 0x16,   /* 上半身: 髪 肌 キャップ */
     0x1A, 0x30, 0x12, 0x36,   /* 下半身: シャツ ジーンズ 肌 */
     0x1A, 0x0F, 0x36, 0x16,
@@ -91,6 +90,25 @@ static u32 job_x, job_y;                /* 取得開始のワールド座標 */
 static unsigned char job_n, job_fetched, job_done, job_vert, job_sx, job_sy;
 
 static unsigned char attr_shadow[256];   /* 属性テーブルの控え (NT0..3 の 64 バイトずつ) */
+
+/* 輪の各マス (32x30) の、見た目に出ないフラグ。1 マス 1bit、マス (sx, sy) はビット番号 sy * 32 + sx。
+ * VRAM の絵からは分からないので、通行判定のために覚えておく。
+ *   road_too: 道路でもある (線路・踏切のマスに道路も重なる、道路が上の線の下を通って隠れている)
+ *   rail_too: 線路でもある (線路が上の線の下を通って絵に出ない。将来の電車が、途切れずに線路をたどるため) */
+static unsigned char road_too[(RING_W * RING_H) / 8];
+static unsigned char rail_too[(RING_W * RING_H) / 8];
+static unsigned probe_cell;    /* 進行方向の先のマスのビット番号 */
+
+static void set_flag(unsigned char *table, unsigned char sx, unsigned char sy, unsigned char on)
+{
+    unsigned i = (unsigned)sy * RING_W + sx;
+    unsigned char m = 1 << (i & 7);
+    if (on) {
+        table[i >> 3] |= m;
+    } else {
+        table[i >> 3] &= (unsigned char)~m;
+    }
+}
 
 #ifdef PROFILE
 #define DBG(n) (*(volatile unsigned char *)(0x05F0 + (n)))
@@ -186,7 +204,9 @@ static void job_fetch(unsigned char max)
 static void stream_cells(unsigned char max)
 {
     while (max-- && job_done < job_fetched) {
-        queue_cell(job_sx, job_sy, job_buf[job_done]);
+        set_flag(road_too, job_sx, job_sy, job_buf[job_done] & F_ROAD_TOO);
+        set_flag(rail_too, job_sx, job_sy, job_buf[job_done] & F_RAIL_TOO);
+        queue_cell(job_sx, job_sy, job_buf[job_done] & T_ID_MASK);
         ++job_done;
         if (job_vert) {
             if (++job_sy == RING_H) {
@@ -210,10 +230,11 @@ static void probe_run(void)
     PPU_ADDR = (unsigned char)probe_addr;
     t = PPU_DATA;                   /* 1 回目は読み捨て */
     t = PPU_DATA >> 2;
-    /* 線路は z14 以上で通行不可 (z13 以下は地図が分断されるので通す) */
+    /* 線路は z14 以上で通行不可 (z13 以下は地図が分断されるので通す)。ただし道路も重なるマスは通れる */
     probe = ((t >= T_ROCK && t <= T_BUILDING)           /* 岩山・水・建物 (ID が連続) */
              || t == T_WETLAND
-             || (z >= 14 && t >= T_RAIL_FIRST && t <= T_RAIL_LAST))
+             || (z >= 14 && t >= T_RAIL_FIRST && t <= T_RAIL_LAST
+                 && !(road_too[probe_cell >> 3] & (1 << (probe_cell & 7)))))
             ? PROBE_BLOCKED : PROBE_OK;
 }
 
@@ -307,7 +328,7 @@ static void begin_step(unsigned char d)
 
 static void update_player(unsigned char pad)
 {
-    unsigned char want = DIR_NONE;
+    unsigned char want = DIR_NONE, psx, psy;
 
     if (ox || oy) {
         advance();
@@ -349,10 +370,12 @@ static void update_player(unsigned char pad)
     if ((want == DIR_UP && cy == 0) || (want == DIR_DOWN && cy == world_mask)) {
         return;                     /* 極の先には進めない */
     }
-    if (want == DIR_UP)         probe_addr = cell_addr(cx & (RING_W - 1), slot_off(-1));
-    else if (want == DIR_DOWN)  probe_addr = cell_addr(cx & (RING_W - 1), slot_off(1));
-    else if (want == DIR_LEFT)  probe_addr = cell_addr((cx - 1) & (RING_W - 1), sy_slot);
-    else                        probe_addr = cell_addr((cx + 1) & (RING_W - 1), sy_slot);
+    if (want == DIR_UP)         { psx = cx & (RING_W - 1);       psy = slot_off(-1); }
+    else if (want == DIR_DOWN)  { psx = cx & (RING_W - 1);       psy = slot_off(1); }
+    else if (want == DIR_LEFT)  { psx = (cx - 1) & (RING_W - 1); psy = sy_slot; }
+    else                        { psx = (cx + 1) & (RING_W - 1); psy = sy_slot; }
+    probe_addr = cell_addr(psx, psy);
+    probe_cell = (unsigned)psy * RING_W + psx;
     probe = PROBE_REQ;
 }
 
@@ -376,7 +399,13 @@ static void init_world(void)
 /* z, cx, cy から VRAM とスクロールを作り直して表示を始める */
 static void reload_world(void)
 {
+    unsigned char i;
+
     PPU_MASK = 0;
+    for (i = 0; i < sizeof road_too; ++i) {
+        road_too[i] = 0;
+        rail_too[i] = 0;
+    }
     world_mask = (1UL << (z + 4)) - 1;
     cx &= world_mask;
     sy_slot = cy % RING_H;
