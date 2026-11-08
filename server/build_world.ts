@@ -22,7 +22,7 @@ import { landFromCoast } from "./coast";
 import { loadFeatures, xToLon, yToLat } from "./osmfeatures";
 import { readPolygons } from "./shapefile";
 import { allSpots, spotBbox } from "./spots";
-import { BLOCK_M, MERC, Painter, blockRange, stationMarkers, type Land } from "./worldbuild";
+import { BLOCK_M, MERC, Painter, blockRange, airportMarkers, stationMarkers, type Land } from "./worldbuild";
 import { BLOCK_SIZE, createDb, writeBlock, writeLine17 } from "./worlddb";
 
 const DEFAULTS = {
@@ -72,6 +72,7 @@ async function build(o: typeof DEFAULTS & { bboxes: Bbox[]; tile: number; margin
   const { store, coast, stationNodes } = await loadFeatures(o.pbf, { bbox: regions[0].box, bboxes: regions.map((r) => r.box), margin: o.margin, log: lap });
   const areas = store.areas(), lines = store.lines();
   const stations = stationMarkers(store, stationNodes);
+  const airports = airportMarkers(store);
   gc();
   lap(`地物 面 ${areas.length} 線 ${lines.length} 海岸線 ${coast.length} 本、駅 ${stations.length} 個`);
 
@@ -94,7 +95,7 @@ async function build(o: typeof DEFAULTS & { bboxes: Bbox[]; tile: number; margin
     }
     for (let ty = by0; ty <= by1; ty += o.tile) {
       for (let tx = bx0; tx <= bx1; tx += o.tile) {
-        painter.paint(tx, ty, land, store, areas, lines, stations);
+        painter.paint(tx, ty, land, store, areas, lines, stations, airports);
         db.transaction(() => {
           for (let j = 0; j < o.tile; j++) {
             for (let i = 0; i < o.tile; i++) {

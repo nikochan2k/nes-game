@@ -14,7 +14,7 @@ import * as T from "./terrain";
 import {
   cellToLonLat, cellToMeters, elevationToRgb, encodePng, writePbf, writeShp, type TNode, type TWay,
 } from "./testutil";
-import { BLOCK_M, CELL_M, MERC, Painter, blockRange, fillSmallHoles, lonLatToBlock, slopeLevel, slopeLevels, stairify, stationMarkers, thinMask } from "./worldbuild";
+import { BLOCK_M, CELL_M, MERC, Painter, blockRange, fillSmallHoles, lonLatToBlock, slopeLevel, slopeLevels, stairify, stationMarkers, thinMask, airportMarkers } from "./worldbuild";
 import { B3_RAIL_UNDER, BLOCK_SIZE, classId, createDb, writeBlock } from "./worlddb";
 
 const STATION = classId("building", "train_station");
@@ -269,6 +269,40 @@ describe("細線化 (複線を 1 本の鎖にする)", () => {
   });
 });
 
+describe("空港のアスファルト", () => {
+  test("滑走路・誘導路の幅 (m): 幅のタグ、なければ既定値。空港の線でなければ 0", async () => {
+    const { aerowayWidth } = await import("./osmfeatures");
+    expect(aerowayWidth({ aeroway: "runway", width: "60" })).toBe(60);
+    expect(aerowayWidth({ aeroway: "taxiway" })).toBe(23);
+    expect(aerowayWidth({ aeroway: "aerodrome" })).toBe(0);
+    expect(lineAttrsOf({ aeroway: "runway" })?.wide).toBe(45);
+  });
+});
+
+describe("空港", () => {
+  const sq = (x0: number, y0: number, x1: number, y1: number) => [x0, y0, x1, y0, x1, y1, x0, y1];
+  test("ターミナルの面がない空港は敷地の重心に 1 つ。ターミナルがあれば置かない", () => {
+    const aero = classId("aeroway", "aerodrome"), term = classId("aeroway", "terminal");
+    const a = new FeatureStore();
+    a.add({ rank: 12, area: aero }, [sq(100, 100, 300, 200)]);
+    expect(airportMarkers(a)).toEqual([[200, 150]]);
+    const b = new FeatureStore();
+    b.add({ rank: 12, area: aero }, [sq(100, 100, 300, 200)]);
+    b.add({ rank: 12, area: term }, [sq(150, 120, 170, 130)]);
+    expect(airportMarkers(b)).toEqual([]);
+  });
+  test("aeroway=terminal は空港の面。building より優先", () => {
+    expect(areaClassOf({ aeroway: "terminal", building: "yes" })).toBe(classId("aeroway", "terminal"));
+  });
+});
+
+describe("建物の判定", () => {
+  test("屋根 (building=roof) は建物にしない", () => {
+    expect(areaClassOf({ building: "roof" })).toBe(0);
+    expect(areaClassOf({ building: "house" })).not.toBe(0);
+  });
+});
+
 describe("立体交差と駅の位置 (Painter)", () => {
   const BX = 14552, BY = 6451, X0 = BX * BLOCK_SIZE, Y0 = BY * BLOCK_SIZE;
   const land = [{ parts: [Float64Array.from([X0 - 50, Y0 - 50, X0 + 300, Y0 - 50, X0 + 300, Y0 + 300, X0 - 50, Y0 + 300])],
@@ -280,7 +314,7 @@ describe("立体交差と駅の位置 (Painter)", () => {
     const p = new Painter(1);
     p.paint(BX, BY, land, store, store.areas(), store.lines(), stations.map(([x, y]) => [X0 + x, Y0 + y] as [number, number]));
     const cells = p.block(0, 0)!;
-    return (x: number, y: number) => ({ rail: cells[(y * BLOCK_SIZE + x) * 4 + 2], area: cells[(y * BLOCK_SIZE + x) * 4], b3: cells[(y * BLOCK_SIZE + x) * 4 + 3] });
+    return (x: number, y: number) => ({ rail: cells[(y * BLOCK_SIZE + x) * 4 + 2] & 0x3F, raw: cells[(y * BLOCK_SIZE + x) * 4 + 2], area: cells[(y * BLOCK_SIZE + x) * 4], b3: cells[(y * BLOCK_SIZE + x) * 4 + 3] });
   };
 
   test("優先度の高い線 (高架・新幹線) が交差するとき、低い線は交差の所で切れる", () => {
@@ -290,16 +324,26 @@ describe("立体交差と駅の位置 (Painter)", () => {
     expect(at(100, 140).rail).not.toBe(0);
     expect(at(60, 100).rail).not.toBe(0);                         // 低い線 (横) は、交差から離れた所は残る
     expect(at(140, 100).rail).not.toBe(0);
-    for (const x of [98, 99, 101, 102]) expect(at(x, 100).rail).not.toBe(0);   // 並走でない交差は、同じマスだけ (上の線が残る)。両隣は下の線のまま
+    for (const x of [98, 99, 101, 102]) expect(at(x, 100).rail).not.toBe(0);   // 交差のマスだけ上の線に譲る。下の線の両隣は残る
+    expect(at(99, 100).raw & 0x40).toBe(0x40);                    // ただし、上の線のマスとはつながない (下の線は交差で切れて見える)
+    expect(at(100, 100).raw & 0x40).toBe(0x40);                   // 上の線のマスの東も同じ
+    expect(at(100, 99).raw & 0x80).toBe(0);                       // 上の線の中はつなぐ
     expect(at(100, 100).b3 & B3_RAIL_UNDER).toBe(B3_RAIL_UNDER);               // 交差のマスには、下の線が通っている印
     expect(at(60, 100).b3 & B3_RAIL_UNDER).toBe(0);                // 切れていない所には付かない
+  });
+  test("違う路線が隣り合っても、どちらも残るが、つながない (印が付く)", () => {
+    const at = paintLines([{ pts: [[20.5, 100.5], [180.5, 100.5]], prio: 0, grp: 7 }, { pts: [[20.5, 101.5], [180.5, 101.5]], prio: 0, grp: 8 }]);
+    expect(at(60, 100).rail).not.toBe(0);
+    expect(at(60, 101).rail).not.toBe(0);
+    expect(at(60, 100).raw & 0x80).toBe(0x80);                  // 南の隣 (別の路線) とはつながない
+    expect(at(60, 100).raw & 0x40).toBe(0);                     // 東の隣 (同じ路線) とはつなぐ
   });
   test("同じ路線の並走は 1 本にまとめ、違う路線は別々のまま", () => {
     const rows = (at: (x: number, y: number) => { rail: number }) => { let n = 0; for (let y = 90; y < 112; y++) if (at(60, y).rail) n++; return n; };
     const same = paintLines([{ pts: [[20.5, 100.5], [180.5, 100.5]], prio: 0, grp: 7 }, { pts: [[20.5, 102.5], [180.5, 102.5]], prio: 0, grp: 7 }]);
     expect(rows(same)).toBe(1);                                  // 同じ路線の複線は 1 本
-    const diff = paintLines([{ pts: [[20.5, 100.5], [180.5, 100.5]], prio: 0, grp: 7 }, { pts: [[20.5, 102.5], [180.5, 102.5]], prio: 0, grp: 8 }]);
-    expect(rows(diff)).toBe(2);                                  // 違う路線は 2 本のまま
+    const diff = paintLines([{ pts: [[20.5, 100.5], [180.5, 100.5]], prio: 0, grp: 7 }, { pts: [[20.5, 103.5], [180.5, 103.5]], prio: 0, grp: 8 }]);
+    expect(rows(diff)).toBe(2);                                  // 違う路線は、2 マス離れていれば 2 本のまま
   });
 
   test("同じ優先度の線は、交差点のままつながる", () => {
@@ -357,9 +401,9 @@ describe("道路・線路のタイル (server/rail.ts)", () => {
   test("11 種: 直線 2 + 曲がり 4 + T 字 4 + 十字 1。番号は重ならない", () => {
     expect(SHAPES.length).toBe(11);
     expect(new Set(SHAPES).size).toBe(11);
-    expect(new Set(SHAPES.map((a) => railTile(a))).size).toBe(11);
+    expect(new Set(SHAPES.map((a) => railTile(a))).size).toBe(10);      // 線路は ┼ を使わない
     expect(roadTile(15)).toBe(T.T_ROAD + 10);
-    expect(railTile(15)).toBe(T.T_RAIL + 10);
+    expect(railTile(15)).toBe(railTile(ARM_E | ARM_S | ARM_W));      // 線路に ┼ はない
     expect(T.T_ROAD + T.N_SHAPES).toBe(T.T_RAIL);
     expect(T.T_RAIL + T.N_SHAPES).toBe(T.T_CROSSING_H);
   });

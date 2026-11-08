@@ -232,13 +232,28 @@ function station(): Grid {
   return g;
 }
 
+/** 空港 (パレット 2): 駅と同じ、タイル全面の黒い四角に、上から見た白い飛行機。 */
+function airport(): Grid {
+  const rows = ["1111111331111111", "1111111331111111", "1111111331111111", "1111111331111111", "1111113333111111",
+    "1113333333333111", "3333333333333333", "1113333333333111", "1111113333111111", "1111113333111111",
+    "1111113333111111", "1113333333333111", "1113331331333111", "1111111331111111", "1111111111111111", "1111111111111111"];
+  return rows.map((r) => [...r].map(Number));
+}
+
+/** 空港のアスファルト (パレット 2): 灰色に、黒い点が少しだけ。道路の灰色と同じ。 */
+function asphalt(): Grid {
+  const g = grid(2);
+  for (const [x, y] of [[3, 4], [11, 9], [6, 13], [13, 2]]) g[y][x] = 1;
+  return g;
+}
+
 // 並び順は src/terrain.h の T_* と一致させる
 const BG = [grass(), forest(), mountain(), rock(), water(),
   building(), sand(), wetland(),
   ...SHAPES.map((arms) => pathArt(arms, "road")),            // 道路 11 種 (server/rail.ts の SHAPES の並び)
   ...SHAPES.map((arms) => pathArt(arms, "rail")),            // 線路 11 種
   crossing(ARM_E | ARM_W), crossing(ARM_S | ARM_N),          // 踏切 (線路が横 / 縦)
-  station()];
+  station(), airport(), asphalt()];
 
 // ---- プレイヤー (上半身 pal0: 1=髪 2=肌 3=赤キャップ / 下半身 pal1: 1=白 2=ジーンズ 3=肌) ----
 const LEGS_STAND = ["0000022222200000", "0000022222200000", "0000022002200000", "0000011001100000"];

@@ -53,13 +53,14 @@ export interface FeatureAttrs {
   rank: number; area?: number; road?: number; rail?: number;
   hwy?: boolean; river?: boolean; bridge?: boolean; cliff?: boolean;
   prio?: number;                 // 線の上下の優先度 (0..15)。交差する線のうち高い方が上を通り、低い方は交差の所で切れる
+  wide?: number;                 // 幅 (m)。空港の滑走路・誘導路など、幅をつけてアスファルトで塗る線 (0 = 幅なし)
   grp?: number;                  // 路線の識別 (1..65535。0 = 名前なし)。同じ路線の並走だけ 1 本にまとめる
 }
 export const FL_HWY = 1, FL_RIVER = 2, FL_BRIDGE = 4, FL_CLIFF = 8, FL_PRIO_SHIFT = 4;
 
 export class FeatureStore {
   rank = new Grow(Uint8Array); area = new Grow(Uint8Array); road = new Grow(Uint8Array);
-  rail = new Grow(Uint8Array); flags = new Grow(Uint8Array); grp = new Grow(Uint16Array);
+  rail = new Grow(Uint8Array); flags = new Grow(Uint8Array); grp = new Grow(Uint16Array); wide = new Grow(Uint8Array);
   start = new Grow(Int32Array); rings = new Grow(Int32Array);
   minx = new Grow(Int32Array); miny = new Grow(Int32Array);
   maxx = new Grow(Int32Array); maxy = new Grow(Int32Array);
@@ -85,7 +86,7 @@ export class FeatureStore {
     }
     if (n === 0) return false;
     this.rank.push(at.rank); this.area.push(at.area ?? 0); this.road.push(at.road ?? 0);
-    this.rail.push(at.rail ?? 0); this.grp.push(at.grp ?? 0);
+    this.rail.push(at.rail ?? 0); this.grp.push(at.grp ?? 0); this.wide.push(Math.min(255, at.wide ?? 0));
     this.flags.push((at.hwy ? FL_HWY : 0) | (at.river ? FL_RIVER : 0) | (at.bridge ? FL_BRIDGE : 0) | (at.cliff ? FL_CLIFF : 0)
       | (Math.min(15, at.prio ?? 0) << FL_PRIO_SHIFT));
     this.start.push(startAt); this.rings.push(n);
@@ -128,8 +129,9 @@ const AREA_DEFS = CLASSES.map((c, i) => ({ ...c, id: i + 1 }))
   .sort((a, b) => b.rank - a.rank);                // 複数あれば rank の高い方
 export function areaClassOf(tags: Record<string, string>): number {
   for (const c of AREA_DEFS) {
+    // building=roof (ホーム・バス停の屋根) は建物にしない (地上の線路や道路を隠さない)。
     // building=yes は、train_station などの個別の値に当てはまらない建物すべて (rank が低いので最後に判定される)
-    if (c.key === "building" && c.value === "yes" ? tags.building !== undefined && tags.building !== "no" : tags[c.key] === c.value) {
+    if (c.key === "building" && c.value === "yes" ? tags.building !== undefined && tags.building !== "no" && tags.building !== "roof" : tags[c.key] === c.value) {
       return c.id;
     }
   }
@@ -145,7 +147,7 @@ const RAIL_ALIAS: Record<string, string> = { monorail: "light_rail", narrow_gaug
 const roadId = (v: string) => CLASSES.some((c) => c.kind === KIND_ROAD && c.value === v) ? classId("highway", v) : 0;
 const railId = (v: string) => CLASSES.some((c) => c.kind === KIND_RAIL && c.value === v) ? classId("railway", v) : 0;
 
-export interface LineAttrs { road: number; rail: number; hwy: boolean; river: boolean; bridge: boolean; cliff: boolean; prio: number; grp: number }
+export interface LineAttrs { road: number; rail: number; hwy: boolean; river: boolean; bridge: boolean; cliff: boolean; prio: number; grp: number; wide: number }
 
 /**
  * 線の上下の優先度 (0..15): 層 (layer タグ。なければ、橋なら 1、地上なら 0) × 2 + 高速鉄道 (highspeed=yes、新幹線) 1。
@@ -166,6 +168,15 @@ export function routeGroup(tags: Record<string, string>): number {
   return ((h >>> 0) % 65535) + 1;
 }
 
+/** 空港の滑走路・誘導路などの幅 (m)。幅のタグがなければ種類ごとの既定値。空港の線でなければ 0。 */
+const AEROWAY_WIDTH: Record<string, number> = { runway: 45, taxiway: 23, stopway: 45, taxilane: 12, parking_position: 12 };
+export function aerowayWidth(tags: Record<string, string>): number {
+  const d = AEROWAY_WIDTH[tags.aeroway ?? ""];
+  if (!d) return 0;
+  const w = Number.parseFloat(tags.width ?? "");
+  return Number.isFinite(w) && w > 0 ? Math.min(255, Math.round(w)) : d;
+}
+
 /** ウェイの線としての意味。tunnel=yes は地上に出ないので無視。何もなければ null。 */
 export function lineAttrsOf(tags: Record<string, string>): LineAttrs | null {
   if (tags.tunnel === "yes") return null;
@@ -179,9 +190,10 @@ export function lineAttrsOf(tags: Record<string, string>): LineAttrs | null {
   const rail = rv && tags.service === undefined ? railId(RAIL_ALIAS[rv] ?? rv) : 0;
   const river = tags.waterway === "river" || tags.waterway === "canal";
   const cliff = tags.natural === "cliff";
-  if (!hwy && !road && !rail && !river && !cliff) return null;
+  const wide = tags.aeroway ? aerowayWidth(tags) : 0;
+  if (!hwy && !road && !rail && !river && !cliff && !wide) return null;
   const bridge = (hwy || road > 0 || rail > 0) && tags.bridge !== undefined && tags.bridge !== "no";
-  return { road, rail, hwy, river, bridge, cliff, prio: linePrio(tags, bridge), grp: rail ? routeGroup(tags) : 0 };
+  return { road, rail, hwy, river, bridge, cliff, prio: linePrio(tags, bridge), grp: rail ? routeGroup(tags) : 0, wide };
 }
 
 const rankOf = (id: number) => CLASSES[id - 1]?.rank ?? 0;
@@ -339,7 +351,7 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
   // 2. ノード (範囲内か) とウェイ
   let inBox: IdMap | null = new IdMap(1 << 16, false);
   const wId = new Grow(Float64Array), wStart = new Grow(Int32Array), wLen = new Grow(Int32Array);
-  const wInfo = new Grow(Uint32Array), wPrio = new Grow(Uint8Array), wGrp = new Grow(Uint16Array), refs = new Grow(Float64Array, 1 << 16);
+  const wInfo = new Grow(Uint32Array), wPrio = new Grow(Uint8Array), wGrp = new Grow(Uint16Array), wWide = new Grow(Uint8Array), refs = new Grow(Float64Array, 1 << 16);
   const stationNodes: [number, number][] = [];
   await scanPbf(pbf, {
     node(id, lat, lon) {
@@ -366,7 +378,7 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
         | (touches ? W_TOUCH : 0) | (isMember ? W_MEMBER : 0);
       wId.push(id); wStart.push(refs.n); wLen.push(r.length);
       wInfo.push((area | ((line?.road ?? 0) << 8) | ((line?.rail ?? 0) << 16) | (bits << 24)) >>> 0);
-      wPrio.push(line?.prio ?? 0); wGrp.push(line?.grp ?? 0);
+      wPrio.push(line?.prio ?? 0); wGrp.push(line?.grp ?? 0); wWide.push(line?.wide ?? 0);
       for (const x of r) refs.push(x);
     },
   });
@@ -430,7 +442,7 @@ export async function loadFeatures(pbf: string, opt: LoadOptions): Promise<Loade
       const xy = toXY(wStart.a[i], wLen.a[i]);
       if (xy.length >= 4) {
         store.add({ rank: Math.max(rankOf(road), rankOf(rail)), road, rail, hwy: !!(bits & W_HWY),
-          river: !!(bits & W_RIVER), bridge: !!(bits & W_BRIDGE), cliff: !!(bits & W_CLIFF), prio: wPrio.a[i], grp: wGrp.a[i] }, [xy]);
+          river: !!(bits & W_RIVER), bridge: !!(bits & W_BRIDGE), cliff: !!(bits & W_CLIFF), prio: wPrio.a[i], grp: wGrp.a[i], wide: wWide.a[i] }, [xy]);
       }
     }
   }

@@ -14,6 +14,8 @@ enum { T_GRASS, T_FOREST, T_MOUNTAIN, T_ROCK, T_WATER,
        T_RAIL_LAST = T_RAIL_FIRST + 10,
        T_CROSSING_H, T_CROSSING_V,
        T_STATION,
+       T_AIRPORT,
+       T_ASPHALT,
        T_COUNT };
 
 /* 道路の形 (T_ROAD_FIRST からの位置): ─ は 0、│ は 1、┼ は 10 */

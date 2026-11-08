@@ -39,7 +39,8 @@ export function shapeOf(arms: number): number {
   return SHAPES.indexOf(normArms(arms));
 }
 export const roadTile = (arms: number) => T_ROAD + shapeOf(arms);
-export const railTile = (arms: number) => T_RAIL + shapeOf(arms);
+/** 線路には ┼ のタイルを使わない (違う路線は交差で切れる)。4 方向つながるときは、東・南・西の ┬ にする。 */
+export const railTile = (arms: number) => T_RAIL + shapeOf(arms === 15 ? ARM_E | ARM_S | ARM_W : arms);
 
 /** 隣のマスの有無 (has(dx, dy)) から、そのマスのつながる方向のビット。 */
 export function armsOf(has: (dx: number, dy: number) => boolean): number {

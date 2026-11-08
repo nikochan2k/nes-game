@@ -4,9 +4,9 @@
  */
 import { roadMin, railMin } from "./osmsource";
 import { fillRings, linePath, linePathThin, type Window } from "./rasterize";
-import { FL_CLIFF, FL_HWY, FL_PRIO_SHIFT, FL_RIVER, type FeatureStore } from "./osmfeatures";
+import { FIX, FL_CLIFF, FL_HWY, FL_PRIO_SHIFT, FL_RIVER, type FeatureStore } from "./osmfeatures";
 import {
-  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, B3_ROAD_UNDER, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
+  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, RAIL_NO_E, RAIL_NO_S, B3_ROAD_UNDER, B3_SLOPE_SHIFT, BLOCK_SIZE, CELLS, CLASSES, classId,
 } from "./worlddb";
 
 // ---- 座標 (EPSG:3857) ----
@@ -190,6 +190,9 @@ const ST_BUILDING = classId("building", "train_station"), ST_PT = classId("publi
 const ST_RAILWAY = classId("railway", "station"), ST_PLATFORM = classId("railway", "platform");
 const isStationArea = (id: number) => id === ST_BUILDING || id === ST_PT || id === ST_RAILWAY || id === ST_PLATFORM;
 const stationToRail = (id: number) => id === ST_BUILDING || id === ST_RAILWAY || id === ST_PLATFORM;
+// 空港。ターミナル (aeroway=terminal) の面のマスが空港のマス。空港の敷地 (aeroway=aerodrome) は広いので塗らない。
+const ASPHALT = classId("aeroway", "apron");
+const AP_TERMINAL = classId("aeroway", "terminal"), AP_AERODROME = classId("aeroway", "aerodrome");
 /** 駅のマスの面種別 (osmsource が駅として出す) */
 export const STATION_CELL = ST_BUILDING;
 
@@ -242,6 +245,28 @@ export function stationMarkers(store: FeatureStore, nodes: [number, number][] = 
   }
   return kept.map((k) => [Math.floor(k.x), Math.floor(k.y)]);
 }
+/**
+ * ターミナルの面がない空港の位置 (マス座標)。空港の敷地 (aeroway=aerodrome) の重心に 1 マス置く。
+ * 敷地の中 (外接する四角) にターミナルの面が 1 つでもあれば、そのターミナルが空港のマスになるので、置かない。
+ */
+export function airportMarkers(store: FeatureStore): [number, number][] {
+  const terminals: { x: number; y: number; i: number }[] = [];
+  const sites: { x: number; y: number; i: number }[] = [];
+  for (const i of store.areas()) {
+    const id = store.area.a[i];
+    if (id !== AP_TERMINAL && id !== AP_AERODROME) continue;
+    const c = ringCentroid(store.partsOf(i));
+    if (c.size < 0) continue;
+    (id === AP_TERMINAL ? terminals : sites).push({ x: c.x, y: c.y, i });
+  }
+  const out: [number, number][] = [];
+  for (const s of sites) {
+    const inside = terminals.some((t) => t.x * FIX >= store.minx.a[s.i] && t.x * FIX <= store.maxx.a[s.i]
+      && t.y * FIX >= store.miny.a[s.i] && t.y * FIX <= store.maxy.a[s.i]);
+    if (!inside) out.push([Math.floor(s.x), Math.floor(s.y)]);
+  }
+  return out;
+}
 /** 建物からこのマス数以内の「何もない陸」は草ではなく市街地にする (OSM は建物の隙間や庭を塗っていないため) */
 export const URBAN_RADIUS = 3;
 /** 作業台の余白 (マス)。市街地の判定 (URBAN_RADIUS)、線の細線化、立体交差の切断、駅のマスを線路へ寄せる処理が、タイルの境目で食い違わないようにする */
@@ -264,6 +289,7 @@ export class Painter {
   readonly stride: number;       // 余白つきの 1 辺。余白は市街地の判定がタイルの境目で途切れないようにする
   readonly cells: Uint8Array;
   private prio: Uint8Array[];        // 道路 (0) と線路 (1) の、各マスを塗った線の最も高い優先度 (立体交差)
+  private noLink: Uint8Array;         // 線路のマスの、東 (RAIL_NO_E)・南 (RAIL_NO_S) の隣の線路とつながっていない印
   private areaRail: Uint8Array;       // 線路のマスのうち、駅の面から塗って、線に属さないもの
   private grp: Uint32Array[];         // 同、そのマスを塗った線のまとまり (道路 = 優先度、線路 = 路線。名前のない線路は優先度)。同じまとまりの並走だけ 1 本にする
   private win: Window = { x0: 0, y0: 0, x1: 0, y1: 0 };
@@ -274,12 +300,13 @@ export class Painter {
     this.cells = new Uint8Array(this.stride * this.stride * 4);
     this.prio = [new Uint8Array(this.stride * this.stride), new Uint8Array(this.stride * this.stride)];
     this.areaRail = new Uint8Array(this.stride * this.stride);
+    this.noLink = new Uint8Array(this.stride * this.stride);
     this.grp = [new Uint32Array(this.stride * this.stride), new Uint32Array(this.stride * this.stride)];
   }
 
   /** areas / lines は store.areas() / store.lines() (rank の昇順の番号)。 */
   paint(bx0: number, by0: number, land: Land[], store: FeatureStore, areas: Uint32Array, lines: Uint32Array,
-    stations: [number, number][] = []): void {
+    stations: [number, number][] = [], airports: [number, number][] = []): void {
     const { w, cells, margin, stride } = this;
     cells.fill(0);
     this.prio[0].fill(0); this.prio[1].fill(0); this.grp[0].fill(0); this.grp[1].fill(0); this.areaRail.fill(0);
@@ -293,10 +320,16 @@ export class Painter {
         fillRings(l.parts, win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y) + 3] |= LAND; });
       }
     }
+    const inAero = new Uint8Array(stride * stride);     // 空港の敷地の内側
+    for (const i of areas) {                           // 空港の敷地 (aeroway=aerodrome): 全体をアスファルトで塗る。ほかの面 (建物・水・森など) が上に塗られる
+      if (store.area.a[i] !== AP_AERODROME || !store.overlaps(i, win)) continue;
+      fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) { const o = at(x, y); inAero[(y - oy) * stride + (x - ox)] = 1; if (cells[o] === 0) cells[o] = ASPHALT; } });
+    }
     const foot = new Uint8Array(stride * stride);       // 駅舎・駅の面 (railway=station) の内側
     for (const i of areas) {
       if (!store.overlaps(i, win)) continue;
       const id = store.area.a[i];
+      if (id === AP_AERODROME) continue;               // 敷地は塗らない (広い)
       if (isStationArea(id)) {
         if (id === ST_BUILDING || id === ST_RAILWAY) {
           fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) foot[(y - oy) * stride + (x - ox)] = 1; });
@@ -311,11 +344,29 @@ export class Painter {
       }
       fillRings(store.partsOf(i), win, (y, xa, xb) => { for (let x = xa; x < xb; x++) cells[at(x, y)] = id; });
     }
+    {                                                  // 敷地の中の草・農地・森・砂などは、アスファルトにする (滑走路の間の草地が緑に見えないように)
+      const asphaltRank = rankOf(ASPHALT);
+      for (let c = 0; c < inAero.length; c++) if (inAero[c] && rankOf(cells[c * 4]) < asphaltRank) cells[c * 4] = ASPHALT;
+    }
     for (const i of lines) {
       if (!store.overlaps(i, win)) continue;
       const road = store.road.a[i], rail = store.rail.a[i], fl = store.flags.a[i];
       const b3 = (fl & FL_HWY ? B3_HWY : 0) | (fl & FL_CLIFF ? B3_CLIFF : 0);
-      const pr = fl >> FL_PRIO_SHIFT, gr = store.grp.a[i];
+      const pr = fl >> FL_PRIO_SHIFT, gr = store.grp.a[i], wide = store.wide.a[i];
+      if (wide) {                                      // 空港の滑走路・誘導路など: 幅をつけてアスファルトで塗る (建物・水・ターミナルは上書きしない)
+        const rad = Math.round(wide / 2 / (CELL_M * 0.82)), r2 = rad * rad + rad, asphaltRank = rankOf(ASPHALT);
+        for (const p of store.partsOf(i)) {
+          linePath(p, win, (x, y) => {
+            for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) {
+              const px = x + dx, py = y + dy;
+              if (px < win.x0 || px >= win.x1 || py < win.y0 || py >= win.y1 || dx * dx + dy * dy > r2) continue;
+              const o = at(px, py);
+              if (cells[o] === 0 || rankOf(cells[o]) < asphaltRank) cells[o] = ASPHALT;
+            }
+          });
+        }
+        continue;
+      }
       for (const p of store.partsOf(i)) {
         const plot = (x: number, y: number) => {
           const o = at(x, y), c = o >> 2;
@@ -332,6 +383,7 @@ export class Painter {
       }
     }
     this.thinLines();
+    for (let c = 0; c < inAero.length; c++) if (inAero[c] && cells[c * 4] === ASPHALT) cells[c * 4 + 1] = 0;      // 空港の敷地の中の道路は、アスファルトのままにする (灰色の線を描かない)
     // 駅舎の分だけ駅のマスを増やす: 駅舎のすぐ近く (1 マス以内) の線路のマスを、駅のマスにする (東京駅のような大きな駅は複数マス)
     const near = dilate(foot, stride, 1);
     for (let i = 0; i < near.length; i++) if (near[i] && cells[i * 4 + 2]) cells[i * 4] = STATION_CELL;
@@ -339,6 +391,10 @@ export class Painter {
       if (sx < win.x0 || sx >= win.x1 || sy < win.y0 || sy >= win.y1) continue;
       const [tx, ty] = this.snapToRail(sx - ox, sy - oy);
       cells[(ty * stride + tx) * 4] = STATION_CELL;
+    }
+    for (const [ax, ay] of airports) {                // ターミナルがない空港: 敷地の重心に 1 マス
+      if (ax < win.x0 || ax >= win.x1 || ay < win.y0 || ay >= win.y1) continue;
+      cells[((ay - oy) * stride + (ax - ox)) * 4] = AP_TERMINAL;
     }
     this.urbanize();
   }
@@ -386,7 +442,7 @@ export class Painter {
     for (let ly = 0; ly < BLOCK_SIZE; ly++) {
       for (let lx = 0; lx < BLOCK_SIZE; lx++) {
         const s = ((j * BLOCK_SIZE + ly + m) * this.stride + i * BLOCK_SIZE + lx + m) * 4, d = (ly * BLOCK_SIZE + lx) * 3;
-        out[d] = this.cells[s + 1]; out[d + 1] = this.cells[s + 2];
+        out[d] = this.cells[s + 1]; out[d + 1] = this.cells[s + 2] | this.noLink[s >> 2];
         out[d + 2] = this.cells[s + 3] & (B3_HWY | B3_ROAD_UNDER | B3_RAIL_UNDER);
       }
     }
@@ -413,7 +469,8 @@ export class Painter {
       const keys = new Set<number>();
       for (let i = 0; i < n; i++) if (cells[i * 4 + layer]) keys.add(gp[i]);
       // まとまりごとの細線化の結果: 中心線のマス、その種別、優先度
-      const parts: { cls: Uint8Array; pri: Uint8Array; hwy: Uint8Array }[] = [];
+      const keyList = [...keys];
+      const parts: { cls: Uint8Array; pri: Uint8Array; hwy: Uint8Array; hidden: Uint8Array }[] = [];
       for (const key of keys) {
         const orig = new Uint8Array(n);
         for (let i = 0; i < n; i++) if (cells[i * 4 + layer] && gp[i] === key) orig[i] = 1;
@@ -439,19 +496,23 @@ export class Painter {
           cls[i] = cells[best * 4 + layer]; pri[i] = pr[best];
           if (layer === 1) hwy[i] = cells[best * 4 + 3] & B3_HWY ? 1 : 0;
         }
-        parts.push({ cls, pri, hwy });
+        parts.push({ cls, pri, hwy, hidden: new Uint8Array(n) });
       }
       // 立体交差: 各マスの周りにある、他のまとまりの最も高い優先度 (自分より高ければ、自分は消える)
-      const above = new Int16Array(n).fill(-1), aboveKey = new Int32Array(n).fill(-1);
+      const above = new Int32Array(n).fill(-1), aboveKey = new Int32Array(n).fill(-1);
+      // 線路は、同じ優先度でも路線で上下を決める (違う路線は交差でも並走でも混じらない。道路は同じ優先度なら交差点のまま)
+      const val = (k: number, i: number) => layer === 2 ? parts[k].pri[i] * 2097152 + keyList[k] : parts[k].pri[i];
+      const R2 = cut;
+      const reach = cut * cut + cut;
       parts.forEach((p, k) => {
         for (let i = 0; i < n; i++) {
           if (!p.cls[i]) continue;
           const x = i % s, y = (i / s) | 0;
-          for (let dy = -cut; dy <= cut; dy++) for (let dx = -cut; dx <= cut; dx++) {
+          for (let dy = -R2; dy <= R2; dy++) for (let dx = -R2; dx <= R2; dx++) {
             const nx = x + dx, ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= s || ny >= s || dx * dx + dy * dy > cut * cut + cut) continue;
-            const j = ny * s + nx;
-            if (p.pri[i] > above[j]) { above[j] = p.pri[i]; aboveKey[j] = k; }
+            if (nx < 0 || ny < 0 || nx >= s || ny >= s || dx * dx + dy * dy > reach) continue;
+            const j = ny * s + nx, v = val(k, i);
+            if (v > above[j]) { above[j] = v; aboveKey[j] = k; }
           }
         }
       });
@@ -460,10 +521,22 @@ export class Painter {
       parts.forEach((p, k) => {
         for (let i = 0; i < n; i++) {
           if (!p.cls[i]) continue;
-          if (above[i] > p.pri[i] && aboveKey[i] !== k) { hid[i] = 1; continue; }
+          if (above[i] > val(k, i) && aboveKey[i] !== k) { hid[i] = 1; p.hidden[i] = 1; continue; }
           if (p.pri[i] > outPri[i]) { outPri[i] = p.pri[i]; outCls[i] = p.cls[i]; outHwy[i] = p.hwy[i]; }
         }
       });
+      if (layer === 2) {
+        // 隣り合う線路のマスのうち、同じ路線の鎖でつながっていないもの (別の路線が並走して隣り合っただけ) に印を付ける
+        const nl = this.noLink;
+        nl.fill(0);
+        const linked = (i: number, j: number) => parts.some((p) => p.cls[i] && !p.hidden[i] && p.cls[j] && !p.hidden[j]);
+        for (let y = 0; y < s - 1; y++) for (let x = 0; x < s - 1; x++) {
+          const i = y * s + x;
+          if (!outCls[i]) continue;
+          if (outCls[i + 1] && !linked(i, i + 1)) nl[i] |= RAIL_NO_E;
+          if (outCls[i + s] && !linked(i, i + s)) nl[i] |= RAIL_NO_S;
+        }
+      }
       for (let i = 0; i < n; i++) {
         const o = i * 4;
         const had = cells[o + layer] !== 0;
@@ -560,7 +633,7 @@ export class Painter {
         if (a === 0) a = b3 & LAND ? GRASS : SEA;
         const sl = slope ? slope[ly * BLOCK_SIZE + lx] : 0;
         const flags = (b3 & ~LAND) | (sl << B3_SLOPE_SHIFT);
-        out[d] = a; out[d + 1] = this.cells[s + 1]; out[d + 2] = this.cells[s + 2]; out[d + 3] = flags;
+        out[d] = a; out[d + 1] = this.cells[s + 1]; out[d + 2] = this.cells[s + 2] | this.noLink[s >> 2]; out[d + 3] = flags;
         if (a !== SEA || out[d + 1] || out[d + 2] || flags) allSea = false;
       }
     }

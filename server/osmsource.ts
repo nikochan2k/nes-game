@@ -11,21 +11,21 @@ import type { Source } from "./mapserver";
 import { armsOf, crossingFor, railTile, roadTile } from "./rail";
 import * as T from "./terrain";
 import {
-  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, B3_ROAD_UNDER, B3_SLOPE_SHIFT, CLASSES, SLOPE_MOUNTAIN, SLOPE_ROCK,
+  B3_CLIFF, B3_HWY, B3_RAIL_UNDER, RAIL_CLASS_MASK, RAIL_NO_E, RAIL_NO_S, B3_ROAD_UNDER, B3_SLOPE_SHIFT, CLASSES, SLOPE_MOUNTAIN, SLOPE_ROCK,
 } from "./worlddb";
 
 // ---- 種別の意味 ----
-const K_OTHER = 0, K_BUILDING = 1, K_WATER = 2, K_WETLAND = 3, K_ROCK = 4, K_SCREE = 5, K_NATURAL = 6, K_STATION = 7;
+const K_OTHER = 0, K_BUILDING = 1, K_WATER = 2, K_WETLAND = 3, K_ROCK = 4, K_SCREE = 5, K_NATURAL = 6, K_STATION = 7, K_AIRPORT = 8, K_ASPHALT = 9;
 
 const CAT_KIND: Record<string, number> = {
-  building: K_BUILDING, water: K_WATER, wetland: K_WETLAND, rock: K_ROCK, scree: K_SCREE, station: K_STATION,
+  building: K_BUILDING, water: K_WATER, wetland: K_WETLAND, rock: K_ROCK, scree: K_SCREE, station: K_STATION, airport: K_AIRPORT, asphalt: K_ASPHALT,
   grass: K_NATURAL, forest: K_NATURAL,
 };
 // 市街地は建物、農地は草と同じ地形にする (絵を増やさない)。雪 (glacier) は日本にほぼないので岩山にする
 const CAT_TERRAIN: Record<string, number> = {
   grass: T.T_GRASS, forest: T.T_FOREST, urban: T.T_BUILDING, building: T.T_BUILDING, sand: T.T_SAND,
   snow: T.T_ROCK, farm: T.T_GRASS, water: T.T_WATER, wetland: T.T_WETLAND, rock: T.T_ROCK,
-  scree: T.T_MOUNTAIN, station: T.T_STATION,
+  scree: T.T_MOUNTAIN, station: T.T_STATION, airport: T.T_AIRPORT, asphalt: T.T_ASPHALT,
 };
 
 
@@ -48,7 +48,7 @@ const hwyShown = (_z: number) => true;      // 高速道路は全ズームで出
 const ROCK_PCT = 30, MOUNT_PCT = 40;   // 集約時の割合のしきい値 (案)。8.2
 
 // ---- 1 マスの特徴 (ビットにして Map に入れる) ----
-const F_ROAD = 1, F_HWY = 2, F_RAIL = 4, F_ROAD_UNDER = 8, F_RAIL_UNDER = 16;     // 下 2 つ: 上の線に隠れて絵に出ない道路・線路が通るマス
+const F_ROAD = 1, F_HWY = 2, F_RAIL = 4, F_ROAD_UNDER = 8, F_RAIL_UNDER = 16, F_NO_E = 32, F_NO_S = 64;     // 下 2 つ: 上の線に隠れて絵に出ない道路・線路が通るマス
 const F_BASE_SHIFT = 8;
 
 interface Block {
@@ -186,7 +186,7 @@ export class OsmSource implements Source {
   // ---- 地形の決め方 (7 章 6〜11) ----
   private base(area: number, rock: boolean, mount: boolean): number {
     const k = this.kind[area];
-    if (k === K_BUILDING || k === K_WATER || k === K_WETLAND || k === K_STATION) {
+    if (k === K_BUILDING || k === K_WATER || k === K_WETLAND || k === K_STATION || k === K_AIRPORT || k === K_ASPHALT) {
       return this.terr[area];
     }
     if (rock) return T.T_ROCK;
@@ -236,7 +236,7 @@ export class OsmSource implements Source {
     const { rank, kind, counts } = this;
     counts.fill(0);
     let road = false, rail = false, hw = false, waterN = 0, roadUnder = false, railUnder = false;
-    let rockN = 0, mountN = 0, stationN = 0, stationId = 0;
+    let rockN = 0, mountN = 0, stationN = 0, stationId = 0, noE = false, noS = false;
     for (let yy = y0; yy < y0 + s; yy++) {
       for (let xx = x0; xx < x0 + s; xx++) {
         const o = (((yy & 255) << 8) | (xx & 255)) * 4;
@@ -244,15 +244,16 @@ export class OsmSource implements Source {
         counts[a]++;
         const k = kind[a];
         const r = cells[o + 1] !== 0 && rank[cells[o + 1]] >= rmin;
-        const t = cells[o + 2] !== 0 && rank[cells[o + 2]] >= tmin;
+        const rc = cells[o + 2] & RAIL_CLASS_MASK, t = rc !== 0 && rank[rc] >= tmin;
+        if (s === 1) { if (cells[o + 2] & RAIL_NO_E) noE = true; if (cells[o + 2] & RAIL_NO_S) noS = true; }
         if (r) road = true;
         if (t) rail = true;
         if (b3 & B3_ROAD_UNDER) roadUnder = true;
         if (b3 & B3_RAIL_UNDER) railUnder = true;
         if (hwy && (b3 & B3_HWY)) hw = true;
         if (k === K_WATER) waterN++;
-        if (k === K_STATION) { stationN++; stationId = a; }
-        if (k !== K_BUILDING && k !== K_WATER && k !== K_WETLAND && k !== K_STATION) {
+        if (k === K_STATION || k === K_AIRPORT) { stationN++; stationId = a; }
+        if (k !== K_BUILDING && k !== K_WATER && k !== K_WETLAND && k !== K_STATION && k !== K_AIRPORT && k !== K_ASPHALT) {
           const slope = (b3 >> B3_SLOPE_SHIFT) & 7;
           if (k === K_ROCK || (b3 & B3_CLIFF) || slope >= SLOPE_ROCK) {
             rockN++;
@@ -265,10 +266,10 @@ export class OsmSource implements Source {
     if (z === 17 && this.line17Q) {
       // z17 の道路・線路は、z18 のマスを集めずに、地図データから z17 の格子で作ったもの (6.3)
       const d = this.line17(x >> 8, y >> 8);
-      road = rail = hw = roadUnder = railUnder = false;
+      road = rail = hw = roadUnder = railUnder = noE = noS = false;
       if (d) {
         const o = (((y & 255) << 8) | (x & 255)) * 3, f3 = d[o + 2];
-        road = d[o] !== 0; rail = d[o + 1] !== 0; hw = (f3 & B3_HWY) !== 0;
+        road = d[o] !== 0; rail = (d[o + 1] & RAIL_CLASS_MASK) !== 0; noE = (d[o + 1] & RAIL_NO_E) !== 0; noS = (d[o + 1] & RAIL_NO_S) !== 0; hw = (f3 & B3_HWY) !== 0;
         roadUnder = (f3 & B3_ROAD_UNDER) !== 0; railUnder = (f3 & B3_RAIL_UNDER) !== 0;
       }
     }
@@ -278,9 +279,11 @@ export class OsmSource implements Source {
     const rock = s <= 2 ? rockN > 0 : rockN * 100 >= ROCK_PCT * total;
     const mount = mountN * 100 >= MOUNT_PCT * total;
     void waterN;
-    return (this.base(area, rock, mount) << F_BASE_SHIFT)
+    const base = this.base(area, rock, mount);
+    if (base === T.T_ASPHALT) road = false;         // 空港のアスファルトの上の道路は描かない (z18 は塗るときに除く。z17 以下はここで除く)
+    return (base << F_BASE_SHIFT)
       | (road ? F_ROAD : 0) | (hw ? F_HWY : 0) | (rail ? F_RAIL : 0)
-      | (roadUnder ? F_ROAD_UNDER : 0) | (railUnder ? F_RAIL_UNDER : 0);
+      | (roadUnder ? F_ROAD_UNDER : 0) | (railUnder ? F_RAIL_UNDER : 0) | (noE ? F_NO_E : 0) | (noS ? F_NO_S : 0);
   }
 
   /**
@@ -315,9 +318,19 @@ export class OsmSource implements Source {
 
   /** (z, x, y) の隣 (上下左右) のうち、mask のビットが立っているものから、つながる方向のビットを求める。 */
   private armsAt(z: number, w: number, x: number, y: number, mask: number): number {
+    const self = this.feat(z, x, y);
     return armsOf((dx, dy) => {
       const yy = y + dy;
-      return yy >= 0 && yy < w && (this.feat(z, (((x + dx) % w) + w) % w, yy) & mask) !== 0;
+      if (yy < 0 || yy >= w) return false;
+      const nb = this.feat(z, (((x + dx) % w) + w) % w, yy);
+      if ((nb & mask) === 0) return false;
+      if (mask === F_RAIL) {            // 別の路線が隣り合っただけのマスとは、つながない
+        if (dx === 1 && self & F_NO_E) return false;
+        if (dx === -1 && nb & F_NO_E) return false;
+        if (dy === 1 && self & F_NO_S) return false;
+        if (dy === -1 && nb & F_NO_S) return false;
+      }
+      return true;
     });
   }
 
@@ -329,8 +342,8 @@ export class OsmSource implements Source {
     x = ((x % w) + w) % w;
     const f = this.feat(z, x, y);
     const base = f >> F_BASE_SHIFT;
-    if (base === T.T_STATION) {
-      return T.T_STATION;                 // 駅は道路や線路より優先 (1 つの駅に 1 マスだけ)
+    if (base === T.T_STATION || base === T.T_AIRPORT) {
+      return base;                 // 駅は道路や線路より優先 (1 つの駅に 1 マスだけ)
     }
     const road = (f & (F_ROAD | F_HWY)) !== 0, rail = (f & F_RAIL) !== 0;
     if (rail) {
@@ -356,7 +369,7 @@ export class OsmSource implements Source {
     const w = 1 << (z + 4);
     if (y < 0 || y >= w) return 0;
     const f = this.feat(z, ((x % w) + w) % w, y);
-    if ((f >> F_BASE_SHIFT) === T.T_STATION) return 0;
+    if ((f >> F_BASE_SHIFT) === T.T_STATION || (f >> F_BASE_SHIFT) === T.T_AIRPORT) return 0;
     const road = (f & (F_ROAD | F_HWY)) !== 0, rail = (f & F_RAIL) !== 0;
     return ((rail && road) || (f & F_ROAD_UNDER) ? T.F_ROAD_TOO : 0) | ((f & F_RAIL_UNDER) ? T.F_RAIL_TOO : 0);
   }

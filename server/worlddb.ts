@@ -14,7 +14,7 @@ export const KIND_AREA = 0, KIND_ROAD = 1, KIND_RAIL = 2;
 /** 面の意味。種別ごとにゲームの地形が決まる (osmsource.ts の AREA_TERRAIN)。 */
 export type AreaCat =
   | "grass" | "forest" | "urban" | "building" | "sand" | "snow" | "farm"
-  | "water" | "wetland" | "rock" | "scree" | "station";
+  | "water" | "wetland" | "rock" | "scree" | "station" | "airport" | "asphalt";
 
 export interface ClassDef {
   kind: number;
@@ -76,6 +76,11 @@ export const CLASSES: ClassDef[] = [
   { kind: KIND_AREA, key: "public_transport", value: "station", rank: 11, cat: "station" },
   { kind: KIND_AREA, key: "railway", value: "station", rank: 11, cat: "station" },
   { kind: KIND_AREA, key: "railway", value: "platform", rank: 11, cat: "station" },
+  // 空港。ターミナルの面は空港のマス。空港の敷地 (aerodrome) は広いので塗らず、ターミナルがない空港の位置だけに使う
+  { kind: KIND_AREA, key: "aeroway", value: "terminal", rank: 12, cat: "airport" },
+  { kind: KIND_AREA, key: "aeroway", value: "aerodrome", rank: 12, cat: "airport" },
+  // 駐機場の面。滑走路・誘導路などの線は、幅をつけてこの種別で塗る (osmfeatures の wide)
+  { kind: KIND_AREA, key: "aeroway", value: "apron", rank: 7, cat: "asphalt" },
 ];
 
 export function classId(key: string, value: string): number {
@@ -89,6 +94,8 @@ export function classId(key: string, value: string): number {
 // byte3 のビット
 // byte3 のビット: bit0 = 道路が通るが、上の線 (高架・陸橋) に隠れている、bit1 = 崖、bit5 = 高速道路、bit7 = 線路が通るが、上の線に隠れている
 export const B3_ROAD_UNDER = 1, B3_CLIFF = 2, B3_HWY = 32, B3_RAIL_UNDER = 128;
+// 線路の種別 (byte2) の上位 2bit: 隣の線路のマスと「つながっていない」印。別の路線が隣り合っても、混じらない (1 つのマスの東・南の辺だけ持つ。西・北は隣のマスが持つ)
+export const RAIL_CLASS_MASK = 0x3F, RAIL_NO_E = 0x40, RAIL_NO_S = 0x80;
 export const B3_SLOPE_SHIFT = 2;              // bit2〜4 = 傾斜の段階 0〜7
 // 傾斜の段階: 0:<5° 1:<10° 2:<17° 3:<25° 4:<35° 5:<45° 6:<60° 7:60°〜
 export const SLOPE_MOUNTAIN = 4;              // 25° 以上
@@ -138,7 +145,7 @@ export function writeBlock(db: Database, bx: number, by: number, cells: Uint8Arr
     const o = i * 4, a = cells[o], b3 = cells[o + 3];
     areaOf.set(a, (areaOf.get(a) ?? 0) + 1);
     if (cells[o + 1] > road) road = cells[o + 1];
-    if (cells[o + 2] > rail) rail = cells[o + 2];
+    if ((cells[o + 2] & RAIL_CLASS_MASK) > rail) rail = cells[o + 2] & RAIL_CLASS_MASK;
     if (b3 & B3_HWY) motorway = 1;
     const slope = (b3 >> B3_SLOPE_SHIFT) & 7, cat = catOf(a);
     if (cat === "rock" || (b3 & B3_CLIFF) || slope >= SLOPE_ROCK) {
@@ -175,7 +182,7 @@ function rankOf(id: number): number {
 function topClass(cells: Uint8Array, byte: 1 | 2): number {
   const seen = new Uint8Array(256);
   for (let i = byte; i < cells.length; i += 4) {
-    seen[cells[i]] = 1;
+    seen[byte === 2 ? cells[i] & RAIL_CLASS_MASK : cells[i]] = 1;
   }
   let top = 0;
   for (let id = 1; id < 256; id++) {
